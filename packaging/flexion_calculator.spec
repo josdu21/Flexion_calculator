@@ -9,18 +9,23 @@ Output:
     Windows: dist/FlexionCalculator.exe       (single executable, ~80 MB)
 """
 import sys
+import os
 from pathlib import Path
 
 block_cipher = None
 
+# Raíz del proyecto (un nivel arriba de packaging/)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(SPEC), '..'))
+
 # Detectar plataforma para nombrar el binario
 IS_WINDOWS = sys.platform.startswith("win")
 EXE_NAME = "FlexionCalculator"
-ICON_FILE = "assets/icon.ico" if IS_WINDOWS else None
+_icon_path = os.path.join(PROJECT_ROOT, "assets", "icon.ico")
+ICON_FILE = _icon_path if (IS_WINDOWS and os.path.exists(_icon_path)) else None
 
 a = Analysis(
-    ['main.py'],
-    pathex=['.'],
+    [os.path.join(PROJECT_ROOT, 'main.py')],
+    pathex=[PROJECT_ROOT],
     binaries=[],
     datas=[
         # No hay archivos de datos externos: el tema se lee en runtime
