@@ -1,0 +1,98 @@
+╔═══════════════════════════════════════════════════════════════╗
+║     CALCULADORA DE ACERO POR FLEXIÓN - CÓMO EJECUTAR         ║
+╚═══════════════════════════════════════════════════════════════╝
+
+OPCIÓN 1: DESDE EL MENÚ DE APLICACIONES (MÁS FÁCIL)
+═══════════════════════════════════════════════════════════════
+
+1. Abre tu menú de aplicaciones (botón de aplicaciones o tecla Super)
+2. Busca "Calculadora de Acero"
+3. Haz clic para ejecutar
+4. La aplicación se iniciará y instalará PyQt6 si es necesario
+
+✓ RECOMENDADO - No requiere terminal
+
+
+OPCIÓN 2: DESDE TERMINAL CON SCRIPT INTELIGENTE
+═══════════════════════════════════════════════════════════════
+
+$ cd ~/Projects/Flexion_calculator
+$ ./ejecutar.sh
+
+Este script:
+  ✓ Verifica si PyQt6 está instalado
+  ✓ Si no está, lo instala automáticamente
+  ✓ Abre la interfaz gráfica (GUI)
+  ✓ O ejecuta CLI si GUI no puede iniciarse
+
+
+OPCIÓN 3: INSTALAR PyQt6 Y LUEGO EJECUTAR
+═══════════════════════════════════════════════════════════════
+
+$ ~/Projects/Flexion_calculator/instalar.sh
+
+Luego:
+
+$ cd ~/Projects/Flexion_calculator
+$ python main.py
+
+
+OPCIÓN 4: INTERFAZ CLI (SIN INSTALAR NADA)
+═══════════════════════════════════════════════════════════════
+
+$ python ~/Projects/Flexion_calculator/main_cli.py
+
+✓ Sin dependencias externas
+✓ Funciona de inmediato
+✓ Interfaz de línea de comandos
+
+
+SOLUCIÓN DE PROBLEMAS
+═══════════════════════════════════════════════════════════════
+
+P: "No abre desde el menú"
+R: - Abre terminal y ejecuta: ~/Projects/Flexion_calculator/ejecutar.sh
+   - O usa: python ~/Projects/Flexion_calculator/main_cli.py
+
+P: "Dice que falta PyQt6"
+R: Instala manualmente:
+   - Arch: sudo pacman -S python-pyqt6
+   - Debian/Ubuntu: sudo apt install python3-pyqt6
+
+P: "Quiero una interfaz gráfica"
+R: - Instala PyQt6 (ver arriba)
+   - O ejecuta: ./ejecutar.sh
+
+P: "Quiero algo que funcione ya"
+R: Usa CLI: python main_cli.py
+
+
+ESTRUCTURA DE ARCHIVOS
+═══════════════════════════════════════════════════════════════
+
+flexion_calculator/
+├── ejecutar.sh           ← EJECUTABLE PRINCIPAL
+├── instalar.sh           ← INSTALADOR
+├── main.py               ← GUI
+├── main_cli.py           ← CLI
+├── core/                 ← Motor de cálculo
+├── ui/                   ← Interfaz gráfica
+└── README.md             ← Documentación
+
+
+ATAJOS RÁPIDOS
+═══════════════════════════════════════════════════════════════
+
+Terminal:
+  cd ~/Projects/Flexion_calculator && ./ejecutar.sh
+
+Desde cualquier lugar:
+  python ~/Projects/Flexion_calculator/main_cli.py
+
+Menú de aplicaciones:
+  Busca "Calculadora de Acero" → Haz clic
+
+
+═══════════════════════════════════════════════════════════════
+¡Listo! La aplicación está lista para usar en tu escritorio.
+═══════════════════════════════════════════════════════════════
