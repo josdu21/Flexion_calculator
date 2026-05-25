@@ -1,0 +1,72 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'        # se dispara al hacer push de un tag tipo v1.0.0
+  workflow_dispatch: # también permite correrlo manualmente
+
+jobs:
+  build-windows:
+    name: Build Windows .exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build executable
+        run: pyinstaller packaging/flexion_calculator.spec --clean --noconfirm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlexionCalculator-windows
+          path: dist/FlexionCalculator.exe
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename binary for release
+        run: |
+          mkdir release
+          cp artifacts/FlexionCalculator-windows/FlexionCalculator.exe \
+             release/FlexionCalculator-${{ github.ref_name }}-windows.exe
+          ls -lh release/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## 📦 Calculadora de Acero por Flexión ${{ github.ref_name }}
+
+            Diseño por flexión según ACI 318-19.
+
+            ### Descarga
+
+            **Windows**: `FlexionCalculator-${{ github.ref_name }}-windows.exe`
+            Portable — doble clic para ejecutar, sin instalación.
