@@ -15,6 +15,7 @@ from typing import Optional
 from core.flexion import FlexionDesignResult, BeamSection, ReinforcementConfig
 from core.bar_tables import REBAR_SIZES
 from core.units import UnitSystem, get_converter
+from core.shear import BeamShearResult, SlabShearResult
 
 
 def _bar_label(db_mm: float) -> str:
@@ -781,3 +782,474 @@ $$s_{{min}} = \\max(d_b,\\; 25\\,\\text{{mm}})$$
 </body>
 </html>
 """
+
+
+# ============================================================
+#         Memoria de cálculo por CORTANTE (ACI 318-19)
+# ============================================================
+
+_SHEAR_CSS = """
+@page { size: A4; margin: 2cm 2cm 2.5cm 2.5cm; }
+* { box-sizing: border-box; }
+body { font-family: 'Cambria', 'Georgia', 'Times New Roman', serif;
+       font-size: 11pt; line-height: 1.5; color: #000; background: #fff;
+       margin: 0; padding: 0; }
+.page { max-width: 21cm; margin: 0 auto; padding: 2.5cm 2cm; background: #fff; }
+.doc-header { text-align: center; border-bottom: 3px double #000;
+              padding-bottom: 12px; margin-bottom: 24px; }
+.doc-header h1 { font-size: 18pt; margin: 0 0 4px 0; text-transform: uppercase;
+                 letter-spacing: 1px; }
+.doc-header .subtitle { font-size: 11pt; font-style: italic; color: #444; margin: 0; }
+.metadata { display: grid; grid-template-columns: max-content 1fr max-content 1fr;
+            gap: 4px 12px; font-size: 10pt; margin-bottom: 24px; padding: 8px 12px;
+            border: 1px solid #999; background: #f5f5f5; }
+.metadata .label { font-weight: bold; }
+h2 { font-size: 14pt; margin: 24px 0 10px 0; padding-bottom: 4px;
+     border-bottom: 2px solid #333; page-break-after: avoid; }
+h3 { font-size: 12pt; margin: 16px 0 6px 0; color: #222; page-break-after: avoid; }
+p { margin: 6px 0; text-align: justify; }
+.aci-ref { display: inline-block; font-size: 9pt; font-style: italic; color: #555;
+           background: #eef; padding: 1px 6px; border-left: 3px solid #336; margin-left: 6px; }
+.step { margin: 12px 0; padding: 8px 12px; border-left: 3px solid #ccc;
+        background: #fafafa; page-break-inside: avoid; }
+.step .step-title { font-weight: bold; color: #333; margin-bottom: 4px; }
+table.data { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 10.5pt; }
+table.data th, table.data td { border: 1px solid #888; padding: 5px 8px; text-align: left; }
+table.data th { background: #ddd; font-weight: bold; }
+table.data td.num { text-align: right;
+                    font-family: 'Cambria Math', 'Consolas', monospace; }
+table.data tr:nth-child(even) td { background: #f7f7f7; }
+.result-summary { margin: 20px 0; padding: 14px; border: 2px solid; page-break-inside: avoid; }
+.result-summary.ok   { border-color: #0a6; background: #f0fff4; }
+.result-summary.fail { border-color: #c00; background: #fff0f0; }
+.result-summary.warn { border-color: #c70; background: #fffaf0; }
+.result-summary h3 { margin: 0 0 8px 0; font-size: 13pt; }
+.result-summary.ok h3::before   { content: "✓ "; }
+.result-summary.fail h3::before { content: "✗ "; }
+.result-summary.warn h3::before { content: "⚠ "; }
+.alert { margin: 16px 0; padding: 10px 14px; border-left: 4px solid; }
+.alert-warn { background: #fff8e1; border-color: #c70; }
+.alert-warn h3 { margin-top: 0; color: #850; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 10px;
+        font-size: 9pt; font-weight: bold; }
+.chip.ok   { background: #d4edda; color: #155724; border: 1px solid #28a745; }
+.chip.fail { background: #f8d7da; color: #721c24; border: 1px solid #dc3545; }
+.doc-footer { margin-top: 40px; padding-top: 8px; border-top: 1px solid #888;
+              font-size: 9pt; color: #555; text-align: center; }
+.print-bar { position: sticky; top: 0; background: #2c3e50; color: #fff;
+             padding: 8px 16px; display: flex; gap: 12px; align-items: center;
+             z-index: 100; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
+.print-bar button { background: #3498db; color: #fff; border: none;
+                    padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 10pt; }
+.print-bar button:hover { background: #5dade2; }
+@media print { .print-bar { display: none; } body { background: #fff; }
+               .page { box-shadow: none; padding: 0; } .step { background: transparent; } }
+@media screen { body { background: #e8e8e8; padding: 0; }
+                .page { box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+                        margin-top: 20px; margin-bottom: 20px; } }
+"""
+
+
+def _shear_envelope(body_inner: str, title: str, element_name: str) -> str:
+    """Plantilla HTML+MathJax común a las memorias de cortante."""
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>{title}</title>
+<script>
+window.MathJax = {{
+  tex: {{
+    inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+    displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+    processEscapes: true, tags: 'ams'
+  }},
+  svg: {{ fontCache: 'global' }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>{_SHEAR_CSS}</style>
+</head>
+<body>
+<div class="print-bar">
+  <strong>📄 Memoria de Cálculo — Cortante</strong>
+  <button onclick="window.print()">🖨 Imprimir / Guardar PDF</button>
+  <span style="margin-left:auto; font-size:10pt;">{element_name}</span>
+</div>
+<div class="page">
+{body_inner}
+</div>
+</body>
+</html>
+"""
+
+
+def generate_shear_beam_html_report(
+    result: BeamShearResult,
+    unit_system: UnitSystem,
+    project_name: str = "Proyecto sin título",
+    element_name: str = "Viga V-1",
+    designer: str = "",
+) -> str:
+    """Memoria de cálculo de cortante en viga (modo diseño)."""
+    cv = get_converter(unit_system)
+    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    L = lambda mm, d=1: cv.format_length_small(mm, d)
+    F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
+    S = lambda mpa, d=1: f"{mpa / cv.stress_to_mpa:.{d}f} {cv.stress_unit}"
+
+    fc = result.fc_mpa
+    fyt = result.fyt_mpa
+    b = result.b_mm
+    h = result.h_mm
+    d = result.d_mm
+    lam = result.lam
+    av = result.av_mm2
+    vu_n = result.vu_kn * 1000.0
+    vc_n = result.vc_kn * 1000.0
+    phi_vc_n = result.phi_vc_kn * 1000.0
+    vs_req_n = result.vs_required_kn * 1000.0
+    vs_lim_n = result.vs_max_kn * 1000.0
+
+    sqrt_fc = math.sqrt(fc) if fc > 0 else 0.0
+
+    status_class = {
+        "OK": "ok",
+        "NO REQUIERE ESTRIBOS": "ok",
+        "AUMENTAR SECCIÓN": "fail",
+        "ERROR": "fail",
+    }.get(result.status, "warn")
+
+    regime_label = {
+        "NO REQUIERE": "No requiere estribos",
+        "MINIMO": "Estribos por mínimo (Av,min)",
+        "DISEÑO": "Estribos por diseño",
+    }.get(result.regime, result.regime)
+
+    cap_ratio = (result.phi_vn_kn / result.vu_kn) if result.vu_kn > 0 else float("inf")
+    cap_class = "ok" if (cap_ratio == float("inf") or cap_ratio >= 1.0) else "fail"
+    cap_text = "CUMPLE" if (cap_ratio == float("inf") or cap_ratio >= 1.0) else "NO CUMPLE"
+    cap_ratio_str = "∞" if cap_ratio == float("inf") else f"{cap_ratio:.3f}"
+
+    warnings_html = ""
+    if result.warnings:
+        warnings_html = (
+            '<div class="alert alert-warn"><h3>⚠ Advertencias</h3><ul>'
+            + "".join(f"<li>{w}</li>" for w in result.warnings)
+            + "</ul></div>"
+        )
+
+    # Bloque de cálculo de Vs / s
+    if result.regime == "DISEÑO":
+        vs_block = f"""
+<h3>2.4 Cortante requerido del refuerzo $V_s$
+  <span class="aci-ref">ACI 318-19 §22.5.1.1</span>
+</h3>
+<div class="step">
+  <div class="step-title">$V_s$ requerido</div>
+  $$V_s = \\dfrac{{V_u - \\phi V_c}}{{\\phi}} =
+    \\dfrac{{{vu_n:.0f} - {phi_vc_n:.0f}}}{{0.75}} =
+    {vs_req_n:.0f}\\;\\text{{N}} = {F(result.vs_required_kn)}$$
+</div>
+<p>Verificación del límite máximo (ACI 22.5.1.2):
+$V_s \\le 0.66\\sqrt{{f'_c}}\\,b_w d = {vs_lim_n:.0f}\\;\\text{{N}} = {F(result.vs_max_kn)}$
+&nbsp;<span class="chip {'ok' if vs_req_n <= vs_lim_n else 'fail'}">
+{'CUMPLE' if vs_req_n <= vs_lim_n else 'EXCEDE'}</span></p>
+
+<h3>2.5 Separación por resistencia</h3>
+<div class="step">
+  <div class="step-title">$s$ requerido</div>
+  $$\\left(\\dfrac{{A_v}}{{s}}\\right)_{{req}} = \\dfrac{{V_s}}{{f_{{yt}}\\,d}}
+    = \\dfrac{{{vs_req_n:.0f}}}{{{fyt:.1f} \\cdot {d:.2f}}}
+    = {(vs_req_n / (fyt * d)):.4f}\\;\\text{{mm}}^2/\\text{{mm}}$$
+  $$s_{{req}} = \\dfrac{{A_v}}{{(A_v/s)_{{req}}}} = {L(result.s_required_mm, 1)}$$
+</div>
+"""
+    elif result.regime == "MINIMO":
+        vs_block = """
+<h3>2.4 Régimen</h3>
+<p>$0.5 \\phi V_c < V_u \\le \\phi V_c$ — no se requiere Vs por resistencia; se
+adopta el armado mínimo por cortante.</p>
+"""
+    else:
+        vs_block = """
+<h3>2.4 Régimen</h3>
+<p>$V_u \\le 0.5 \\phi V_c$ — la viga no requiere refuerzo por cortante. Aun así
+es recomendable disponer estribos mínimos por consideraciones constructivas.</p>
+"""
+
+    # Tabla resumen del adoptado
+    if result.regime != "NO REQUIERE":
+        adopted_row = f"""
+<tr><td>$s$ requerido por resistencia</td>
+    <td class="num">{L(result.s_required_mm, 1) if result.s_required_mm > 0 else '—'}</td></tr>
+<tr><td>$s$ por $A_{{v,min}}$ <span class="aci-ref">ACI 9.6.3.4</span></td>
+    <td class="num">{L(result.s_min_required_mm, 1) if result.s_min_required_mm > 0 else '—'}</td></tr>
+<tr><td>$s_{{max}}$ <span class="aci-ref">ACI 9.7.6.2.2</span></td>
+    <td class="num">{L(result.s_max_mm, 1)}</td></tr>
+<tr><td><b>$s$ ADOPTADO</b></td>
+    <td class="num"><b>{L(result.s_adopted_mm, 1)}</b></td></tr>
+"""
+    else:
+        adopted_row = ""
+
+    body = f"""
+<div class="doc-header">
+  <h1>Memoria de Cálculo</h1>
+  <p class="subtitle">Diseño por cortante en viga según ACI 318-19</p>
+</div>
+
+<div class="metadata">
+  <span class="label">Proyecto:</span><span>{project_name}</span>
+  <span class="label">Fecha:</span><span>{fecha}</span>
+  <span class="label">Elemento:</span><span>{element_name}</span>
+  <span class="label">Tipo:</span><span>Viga rectangular</span>
+  <span class="label">Diseñador:</span><span>{designer or "—"}</span>
+  <span class="label">Norma:</span><span>ACI 318-19</span>
+</div>
+
+<h2>1. Datos de entrada</h2>
+
+<h3>1.1 Solicitación</h3>
+<table class="data">
+  <tr><td>Cortante último</td><td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+</table>
+
+<h3>1.2 Geometría</h3>
+<table class="data">
+  <tr><td>Ancho del alma</td><td>$b_w$</td><td class="num">{L(b)}</td></tr>
+  <tr><td>Altura total</td><td>$h$</td><td class="num">{L(h)}</td></tr>
+  <tr><td>Recubrimiento libre</td><td>$r$</td><td class="num">{L(result.cover_mm)}</td></tr>
+  <tr><td>Peralte efectivo asumido</td><td>$d$</td><td class="num">{L(d, 2)}</td></tr>
+</table>
+
+<h3>1.3 Materiales</h3>
+<table class="data">
+  <tr><td>Resistencia del concreto</td><td>$f'_c$</td><td class="num">{S(fc)}</td></tr>
+  <tr><td>Fluencia del estribo</td><td>$f_{{yt}}$</td><td class="num">{S(fyt)}</td></tr>
+  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>
+</table>
+
+<h3>1.4 Estribo propuesto</h3>
+<table class="data">
+  <tr><td>Diámetro del estribo</td><td>$d_e$</td><td class="num">{_bar_label(result.stirrup_diameter_mm)} ({result.stirrup_diameter_mm:.2f} mm)</td></tr>
+  <tr><td>Número de ramas</td><td>$n$</td><td class="num">{result.stirrup_legs}</td></tr>
+  <tr><td>Área total de ramas</td><td>$A_v = n \\cdot A_b$</td><td class="num">{av:.1f} mm²</td></tr>
+</table>
+
+<h2>2. Cálculos de diseño</h2>
+
+<h3>2.1 Resistencia del concreto $V_c$
+  <span class="aci-ref">ACI 318-19 §22.5.5.1 (simplificada)</span>
+</h3>
+<div class="step">
+  <div class="step-title">$V_c = 0.17 \\lambda \\sqrt{{f'_c}}\\, b_w d$</div>
+  $$V_c = 0.17 \\cdot {lam:.2f} \\cdot \\sqrt{{{fc:.1f}}} \\cdot {b:.1f} \\cdot {d:.2f}
+    = {vc_n:.0f}\\;\\text{{N}} = {F(result.vc_kn)}$$
+</div>
+
+<h3>2.2 Capacidad reducida del concreto
+  <span class="aci-ref">ACI 318-19 §21.2.1, $\\phi = 0.75$</span>
+</h3>
+<div class="step">
+  $$\\phi V_c = 0.75 \\cdot V_c = {phi_vc_n:.0f}\\;\\text{{N}} = {F(result.phi_vc_kn)}$$
+</div>
+
+<h3>2.3 Verificación del régimen</h3>
+<p>Se compara $V_u$ con $\\phi V_c$ y $0.5\\,\\phi V_c$:</p>
+<table class="data">
+  <tr><td>$0.5\\,\\phi V_c$</td><td class="num">{F(result.phi_vc_kn * 0.5)}</td></tr>
+  <tr><td>$\\phi V_c$</td><td class="num">{F(result.phi_vc_kn)}</td></tr>
+  <tr><td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+  <tr><td><b>Régimen detectado</b></td><td><b>{regime_label}</b></td></tr>
+</table>
+
+{vs_block}
+
+<h3>2.6 Armado mínimo y separación máxima</h3>
+<p>Refuerzo mínimo por cortante <span class="aci-ref">ACI 318-19 §9.6.3.4</span>:</p>
+<div class="step">
+  $$\\left(\\dfrac{{A_v}}{{s}}\\right)_{{min}} =
+     \\max\\!\\left(\\dfrac{{0.062 \\sqrt{{f'_c}}}}{{f_{{yt}}}},\\;
+     \\dfrac{{0.35}}{{f_{{yt}}}}\\right)\\, b_w
+     = \\max\\!\\left(\\dfrac{{0.062 \\cdot {sqrt_fc:.3f}}}{{{fyt:.1f}}},\\;
+     \\dfrac{{0.35}}{{{fyt:.1f}}}\\right) \\cdot {b:.1f}$$
+</div>
+<p>Separación máxima <span class="aci-ref">ACI 318-19 §9.7.6.2.2</span>:</p>
+<div class="step">
+  $$s_{{max}} = \\begin{{cases}}
+       \\min(d/2,\\;600\\,\\text{{mm}}) & \\text{{si }} V_s \\le 0.33\\sqrt{{f'_c}}\\,b_w d \\\\
+       \\min(d/4,\\;300\\,\\text{{mm}}) & \\text{{en caso contrario}}
+     \\end{{cases}}$$
+  $$s_{{max}} = {L(result.s_max_mm, 1)}$$
+</div>
+
+<h2>3. Resultado del diseño</h2>
+<table class="data">
+{adopted_row}
+<tr><td>$\\phi V_n = \\phi(V_c + V_s)$ con $s$ adoptado</td>
+    <td class="num">{F(result.phi_vn_kn)}</td></tr>
+<tr><td>Relación $\\phi V_n / V_u$</td>
+    <td class="num">{cap_ratio_str}
+      <span class="chip {cap_class}">{cap_text}</span></td></tr>
+</table>
+
+{warnings_html}
+
+<h2>4. Resumen</h2>
+<div class="result-summary {status_class}">
+  <h3>Estado: {result.status}</h3>
+  <table class="data" style="margin-top: 8px;">
+    <tr><td>Sección</td><td>${L(b, 1)} \\times {L(h, 1)}$</td>
+        <td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+    <tr><td>Estribo</td><td><b>{_bar_label(result.stirrup_diameter_mm)} ({result.stirrup_legs} ramas)</b></td>
+        <td>$\\phi V_c$</td><td class="num">{F(result.phi_vc_kn)}</td></tr>
+    <tr><td>$s$ adoptado</td>
+        <td><b>{L(result.s_adopted_mm, 1) if result.s_adopted_mm > 0 else '—'}</b></td>
+        <td>$\\phi V_n$</td><td class="num"><b>{F(result.phi_vn_kn)}</b></td></tr>
+  </table>
+</div>
+
+<div class="doc-footer">
+  <p>Memoria generada por <b>Calculadora de Acero por Flexión</b> —
+  Diseño conforme a ACI 318-19 — {fecha}</p>
+</div>
+"""
+    return _shear_envelope(body, f"Memoria — Cortante {element_name}", element_name)
+
+
+def generate_shear_slab_html_report(
+    result: SlabShearResult,
+    unit_system: UnitSystem,
+    project_name: str = "Proyecto sin título",
+    element_name: str = "Losa L-1",
+    designer: str = "",
+) -> str:
+    """Memoria de cálculo de cortante en losa (revisión, sin refuerzo)."""
+    cv = get_converter(unit_system)
+    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    L = lambda mm, d=1: cv.format_length_small(mm, d)
+    F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
+    S = lambda mpa, d=1: f"{mpa / cv.stress_to_mpa:.{d}f} {cv.stress_unit}"
+
+    fc = result.fc_mpa
+    b = result.b_mm
+    h = result.h_mm
+    d = result.d_mm
+    lam = result.lam
+    vu_n = result.vu_kn * 1000.0
+    vc_n = result.vc_kn * 1000.0
+    phi_vc_n = result.phi_vc_kn * 1000.0
+
+    status_class = {
+        "OK": "ok",
+        "AUMENTAR SECCIÓN": "fail",
+        "ERROR": "fail",
+    }.get(result.status, "warn")
+
+    ratio = result.ratio
+    ratio_str = "∞" if ratio == float("inf") else f"{ratio:.3f}"
+    cap_class = "ok" if (ratio == float("inf") or ratio >= 1.0) else "fail"
+    cap_text = "CUMPLE" if (ratio == float("inf") or ratio >= 1.0) else "NO CUMPLE"
+
+    warnings_html = ""
+    if result.warnings:
+        warnings_html = (
+            '<div class="alert alert-warn"><h3>⚠ Advertencias</h3><ul>'
+            + "".join(f"<li>{w}</li>" for w in result.warnings)
+            + "</ul></div>"
+        )
+
+    body = f"""
+<div class="doc-header">
+  <h1>Memoria de Cálculo</h1>
+  <p class="subtitle">Revisión de cortante en losa según ACI 318-19</p>
+</div>
+
+<div class="metadata">
+  <span class="label">Proyecto:</span><span>{project_name}</span>
+  <span class="label">Fecha:</span><span>{fecha}</span>
+  <span class="label">Elemento:</span><span>{element_name}</span>
+  <span class="label">Tipo:</span><span>Losa (franja unitaria 1 m)</span>
+  <span class="label">Diseñador:</span><span>{designer or "—"}</span>
+  <span class="label">Norma:</span><span>ACI 318-19 §22.5</span>
+</div>
+
+<h2>1. Datos de entrada</h2>
+
+<h3>1.1 Solicitación</h3>
+<table class="data">
+  <tr><td>Cortante último por franja unitaria</td><td>$V_u$</td>
+      <td class="num">{F(result.vu_kn)}</td></tr>
+</table>
+
+<h3>1.2 Geometría</h3>
+<table class="data">
+  <tr><td>Ancho considerado (franja 1 m)</td><td>$b$</td><td class="num">{L(b, 1)}</td></tr>
+  <tr><td>Espesor de losa</td><td>$h$</td><td class="num">{L(h, 1)}</td></tr>
+  <tr><td>Recubrimiento libre</td><td>$r$</td><td class="num">{L(result.cover_mm, 1)}</td></tr>
+  <tr><td>Peralte efectivo asumido</td><td>$d$</td><td class="num">{L(d, 2)}</td></tr>
+</table>
+
+<h3>1.3 Materiales</h3>
+<table class="data">
+  <tr><td>Resistencia del concreto</td><td>$f'_c$</td><td class="num">{S(fc)}</td></tr>
+  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>
+</table>
+
+<h2>2. Cálculos</h2>
+
+<h3>2.1 Resistencia del concreto $V_c$
+  <span class="aci-ref">ACI 318-19 §22.5.5.1</span>
+</h3>
+<p>Para losas, el refuerzo transversal no está permitido (ACI 8.6.1) cuando
+$h$ es pequeño, por lo que la resistencia al cortante depende exclusivamente
+del concreto:</p>
+<div class="step">
+  <div class="step-title">$V_c = 0.17 \\lambda \\sqrt{{f'_c}}\\, b\\, d$</div>
+  $$V_c = 0.17 \\cdot {lam:.2f} \\cdot \\sqrt{{{fc:.1f}}} \\cdot {b:.1f} \\cdot {d:.2f}
+    = {vc_n:.0f}\\;\\text{{N}} = {F(result.vc_kn)}$$
+</div>
+
+<h3>2.2 Capacidad reducida
+  <span class="aci-ref">ACI 318-19 §21.2.1, $\\phi = 0.75$</span>
+</h3>
+<div class="step">
+  $$\\phi V_c = 0.75 \\cdot V_c = {phi_vc_n:.0f}\\;\\text{{N}} = {F(result.phi_vc_kn)}$$
+</div>
+
+<h2>3. Verificación</h2>
+<p>Para que la losa no requiera refuerzo por cortante debe cumplirse
+$\\phi V_c \\ge V_u$:</p>
+
+<table class="data">
+  <tr><td>$\\phi V_c$ (capacidad)</td><td class="num">{F(result.phi_vc_kn)}</td></tr>
+  <tr><td>$V_u$ (demanda)</td><td class="num">{F(result.vu_kn)}</td></tr>
+  <tr><td><b>$\\phi V_c / V_u$</b></td>
+      <td class="num"><b>{ratio_str}</b>
+        <span class="chip {cap_class}">{cap_text}</span></td></tr>
+</table>
+
+{warnings_html}
+
+<h2>4. Resumen</h2>
+<div class="result-summary {status_class}">
+  <h3>Estado: {result.status}</h3>
+  <table class="data" style="margin-top: 8px;">
+    <tr><td>Sección</td><td>${L(b, 1)} \\times {L(h, 1)}$</td>
+        <td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+    <tr><td>$d$ efectivo</td><td class="num">{L(d, 2)}</td>
+        <td>$\\phi V_c$</td><td class="num"><b>{F(result.phi_vc_kn)}</b></td></tr>
+    <tr><td>$f'_c$</td><td class="num">{S(fc)}</td>
+        <td>$\\phi V_c / V_u$</td><td class="num"><b>{ratio_str}</b></td></tr>
+  </table>
+</div>
+
+<div class="doc-footer">
+  <p>Memoria generada por <b>Calculadora de Acero por Flexión</b> —
+  Revisión conforme a ACI 318-19 §22.5 — {fecha}</p>
+</div>
+"""
+    return _shear_envelope(body, f"Memoria — Cortante {element_name}", element_name)

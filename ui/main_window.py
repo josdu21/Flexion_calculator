@@ -1,20 +1,26 @@
-"""Ventana principal de la Calculadora de Acero por Flexión."""
+"""Ventana principal de la Calculadora de Acero (Flexión + Cortante)."""
 import os
 import tempfile
 import webbrowser
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QComboBox, QStatusBar, QFrame, QSplitter,
-    QApplication, QFileDialog, QMessageBox
+    QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtCore import Qt
 
 from core.units import UnitSystem
 from core.flexion import BeamSection
-from core.report import generate_html_report
+from core.shear import BeamShearDesign, SlabShearCheck
+from core.report import (
+    generate_html_report,
+    generate_shear_beam_html_report,
+    generate_shear_slab_html_report,
+)
 from ui.input_panel import InputPanel
 from ui.results_panel import ResultsPanel
+from ui.shear_input_panel import BeamShearInputPanel, SlabShearInputPanel
+from ui.shear_results_panel import ShearResultsPanel
 from ui.theme import build_stylesheet
 
 
@@ -24,15 +30,23 @@ class MainWindow(QMainWindow):
         self.current_unit_system = UnitSystem.SI
         self._initializing = True
         self._init_ui()
-        self.setWindowTitle("Calculadora de Acero por Flexión — ACI 318-19")
-        self.resize(1180, 760)
-        self.setMinimumSize(900, 600)
+        self.setWindowTitle(
+            "Calculadora de Acero por Flexión y Cortante — ACI 318-19"
+        )
+        self.resize(1240, 800)
+        self.setMinimumSize(960, 640)
         self.setStyleSheet(build_stylesheet())
 
-        # Ejecutar primer cálculo
+        # Primer cálculo
         self._initializing = False
-        self.calculate_beam()
-        self.calculate_slab()
+        self.calculate_beam_flex()
+        self.calculate_slab_flex()
+        self.calculate_beam_shear()
+        self.calculate_slab_shear()
+
+    # ------------------------------------------------------------
+    #                      Construcción de UI
+    # ------------------------------------------------------------
 
     def _init_ui(self):
         central = QWidget()
@@ -40,24 +54,23 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # --- Header ---
+        # Header
         header = QFrame()
         header.setObjectName("headerFrame")
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(0, 8, 0, 8)
         header_layout.setSpacing(0)
 
-        title = QLabel("🏗  Calculadora de Acero por Flexión")
+        title = QLabel("🏗  Calculadora de Acero — Flexión y Cortante")
         title.setObjectName("headerTitle")
         header_layout.addWidget(title)
 
         subtitle = QLabel("Diseño de vigas y losas según ACI 318-19")
         subtitle.setObjectName("headerSubtitle")
         header_layout.addWidget(subtitle)
-
         root.addWidget(header)
 
-        # --- Barra de control ---
+        # Barra de control
         control_bar = QFrame()
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(16, 10, 16, 10)
@@ -81,38 +94,52 @@ class MainWindow(QMainWindow):
         self.report_button = QPushButton("📄  Memoria de cálculo")
         self.report_button.clicked.connect(self._export_report)
         control_layout.addWidget(self.report_button)
-
         root.addWidget(control_bar)
 
-        # --- Tabs ---
+        # Tabs principales (Viga / Losa) con sub-pestañas internas
         tabs_container = QWidget()
         tabs_layout = QVBoxLayout(tabs_container)
         tabs_layout.setContentsMargins(12, 0, 12, 12)
 
         self.tabs = QTabWidget()
 
-        # Tab Viga
-        self.beam_tab = self._make_tab(is_slab=False)
+        self.beam_tab = self._make_element_tab(is_slab=False)
         self.tabs.addTab(self.beam_tab, "🟦  Viga")
 
-        # Tab Losa
-        self.slab_tab = self._make_tab(is_slab=True)
+        self.slab_tab = self._make_element_tab(is_slab=True)
         self.tabs.addTab(self.slab_tab, "🟩  Losa (franja unitaria)")
 
         tabs_layout.addWidget(self.tabs)
         root.addWidget(tabs_container, 1)
 
-        # Barra de estado
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Listo. Modifica los datos para recalcular.")
 
         self.setCentralWidget(central)
 
-    def _make_tab(self, is_slab: bool) -> QWidget:
+    def _make_element_tab(self, is_slab: bool) -> QWidget:
+        """Construye una pestaña 'Viga' o 'Losa' con sub-pestañas Flexión/Cortante."""
         tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(12)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(6, 8, 6, 6)
+        layout.setSpacing(6)
+
+        sub_tabs = QTabWidget()
+        sub_tabs.addTab(self._make_flexion_subtab(is_slab), "Flexión")
+        sub_tabs.addTab(self._make_shear_subtab(is_slab), "Cortante")
+        layout.addWidget(sub_tabs)
+
+        if is_slab:
+            self.slab_subtabs = sub_tabs
+        else:
+            self.beam_subtabs = sub_tabs
+        return tab
+
+    def _make_flexion_subtab(self, is_slab: bool) -> QWidget:
+        sub = QWidget()
+        sub_layout = QHBoxLayout(sub)
+        sub_layout.setContentsMargins(8, 8, 8, 8)
+        sub_layout.setSpacing(12)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -120,17 +147,46 @@ class MainWindow(QMainWindow):
         inputs = InputPanel(self.current_unit_system, is_slab=is_slab)
         results = ResultsPanel(self.current_unit_system)
 
-        # Conectar el cambio de inputs al recálculo (después de InputPanel creado)
         if is_slab:
-            self.slab_inputs = inputs
-            self.slab_results = results
-            inputs.values_changed.connect(self.calculate_slab)
+            self.slab_flex_inputs = inputs
+            self.slab_flex_results = results
+            inputs.values_changed.connect(self.calculate_slab_flex)
         else:
-            self.beam_inputs = inputs
-            self.beam_results = results
-            inputs.values_changed.connect(self.calculate_beam)
+            self.beam_flex_inputs = inputs
+            self.beam_flex_results = results
+            inputs.values_changed.connect(self.calculate_beam_flex)
 
-        # Envolver en widgets para el splitter
+        self._wrap_in_splitter(splitter, inputs, results)
+        sub_layout.addWidget(splitter)
+        return sub
+
+    def _make_shear_subtab(self, is_slab: bool) -> QWidget:
+        sub = QWidget()
+        sub_layout = QHBoxLayout(sub)
+        sub_layout.setContentsMargins(8, 8, 8, 8)
+        sub_layout.setSpacing(12)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        if is_slab:
+            inputs = SlabShearInputPanel(self.current_unit_system)
+            results = ShearResultsPanel(self.current_unit_system, is_slab=True)
+            self.slab_shear_inputs = inputs
+            self.slab_shear_results = results
+            inputs.values_changed.connect(self.calculate_slab_shear)
+        else:
+            inputs = BeamShearInputPanel(self.current_unit_system)
+            results = ShearResultsPanel(self.current_unit_system, is_slab=False)
+            self.beam_shear_inputs = inputs
+            self.beam_shear_results = results
+            inputs.values_changed.connect(self.calculate_beam_shear)
+
+        self._wrap_in_splitter(splitter, inputs, results)
+        sub_layout.addWidget(splitter)
+        return sub
+
+    def _wrap_in_splitter(self, splitter, inputs, results):
         input_container = QWidget()
         input_container.setMinimumWidth(320)
         input_container.setMaximumWidth(420)
@@ -149,87 +205,154 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 880])
 
-        layout.addWidget(splitter)
-        return tab
+    # ------------------------------------------------------------
+    #                     Cambio de unidades
+    # ------------------------------------------------------------
 
     def _on_unit_changed(self):
-        """Cambia el sistema de unidades en ambos paneles."""
         self._initializing = True
         self.current_unit_system = self.unit_combo.currentData()
         try:
-            self.beam_inputs.update_unit_system(self.current_unit_system)
-            self.slab_inputs.update_unit_system(self.current_unit_system)
-            self.beam_results.update_unit_system(self.current_unit_system)
-            self.slab_results.update_unit_system(self.current_unit_system)
+            for panel in (self.beam_flex_inputs, self.slab_flex_inputs,
+                          self.beam_shear_inputs, self.slab_shear_inputs):
+                panel.update_unit_system(self.current_unit_system)
+            for panel in (self.beam_flex_results, self.slab_flex_results,
+                          self.beam_shear_results, self.slab_shear_results):
+                panel.update_unit_system(self.current_unit_system)
         finally:
             self._initializing = False
-        # Recalcular ambos
-        self.calculate_beam()
-        self.calculate_slab()
+        self.calculate_beam_flex()
+        self.calculate_slab_flex()
+        self.calculate_beam_shear()
+        self.calculate_slab_shear()
         self.statusBar().showMessage(
             f"Sistema cambiado a: {self.current_unit_system.value}", 3000
         )
 
+    # ------------------------------------------------------------
+    #                       Cálculos
+    # ------------------------------------------------------------
+
+    def _active_context(self):
+        """Devuelve (is_beam, is_flexion) según el tab activo."""
+        is_beam = self.tabs.currentIndex() == 0
+        subtabs = self.beam_subtabs if is_beam else self.slab_subtabs
+        is_flexion = subtabs.currentIndex() == 0
+        return is_beam, is_flexion
+
     def _calculate_current(self):
-        """Recalcula el tab activo."""
-        if self.tabs.currentIndex() == 0:
-            self.calculate_beam()
+        is_beam, is_flexion = self._active_context()
+        if is_beam and is_flexion:
+            self.calculate_beam_flex()
+        elif is_beam and not is_flexion:
+            self.calculate_beam_shear()
+        elif not is_beam and is_flexion:
+            self.calculate_slab_flex()
         else:
-            self.calculate_slab()
+            self.calculate_slab_shear()
 
-    def calculate_beam(self):
+    def calculate_beam_flex(self):
         if self._initializing:
             return
         try:
-            values = self.beam_inputs.get_values()
-            section = BeamSection(**values)
-            result = section.design()
-            self.beam_results.display_results(result)
+            values = self.beam_flex_inputs.get_values()
+            result = BeamSection(**values).design()
+            self.beam_flex_results.display_results(result)
             self.statusBar().showMessage(
-                f"Viga calculada • Estado: {result.status}", 3000
+                f"Viga (flexión) • Estado: {result.status}", 3000
             )
         except Exception as e:
-            self.beam_results.clear()
-            self.statusBar().showMessage(f"Error en viga: {e}", 5000)
+            self.beam_flex_results.clear()
+            self.statusBar().showMessage(f"Error en viga (flexión): {e}", 5000)
 
-    def calculate_slab(self):
+    def calculate_slab_flex(self):
         if self._initializing:
             return
         try:
-            values = self.slab_inputs.get_values()
-            section = BeamSection(**values)
-            result = section.design()
-            self.slab_results.display_results(result)
+            values = self.slab_flex_inputs.get_values()
+            result = BeamSection(**values).design()
+            self.slab_flex_results.display_results(result)
             self.statusBar().showMessage(
-                f"Losa calculada • Estado: {result.status}", 3000
+                f"Losa (flexión) • Estado: {result.status}", 3000
             )
         except Exception as e:
-            self.slab_results.clear()
-            self.statusBar().showMessage(f"Error en losa: {e}", 5000)
+            self.slab_flex_results.clear()
+            self.statusBar().showMessage(f"Error en losa (flexión): {e}", 5000)
+
+    def calculate_beam_shear(self):
+        if self._initializing:
+            return
+        try:
+            values = self.beam_shear_inputs.get_values()
+            result = BeamShearDesign(**values).design()
+            self.beam_shear_results.display_results(result)
+            self.statusBar().showMessage(
+                f"Viga (cortante) • Estado: {result.status}", 3000
+            )
+        except Exception as e:
+            self.beam_shear_results.clear()
+            self.statusBar().showMessage(f"Error en viga (cortante): {e}", 5000)
+
+    def calculate_slab_shear(self):
+        if self._initializing:
+            return
+        try:
+            values = self.slab_shear_inputs.get_values()
+            result = SlabShearCheck(**values).check()
+            self.slab_shear_results.display_results(result)
+            self.statusBar().showMessage(
+                f"Losa (cortante) • Estado: {result.status}", 3000
+            )
+        except Exception as e:
+            self.slab_shear_results.clear()
+            self.statusBar().showMessage(f"Error en losa (cortante): {e}", 5000)
+
+    # ------------------------------------------------------------
+    #                       Memoria HTML
+    # ------------------------------------------------------------
 
     def _export_report(self):
-        """Genera la memoria de cálculo HTML del tab activo."""
         try:
-            is_beam = self.tabs.currentIndex() == 0
-            inputs = self.beam_inputs if is_beam else self.slab_inputs
-            values = inputs.get_values()
-            section = BeamSection(**values)
-            result = section.design()
+            is_beam, is_flexion = self._active_context()
 
-            section_type = "Viga" if is_beam else "Losa (franja unitaria)"
-            element_name = "Viga V-1" if is_beam else "Losa L-1"
+            if is_flexion:
+                inputs = self.beam_flex_inputs if is_beam else self.slab_flex_inputs
+                values = inputs.get_values()
+                result = BeamSection(**values).design()
+                section_type = "Viga" if is_beam else "Losa (franja unitaria)"
+                element_name = "Viga V-1" if is_beam else "Losa L-1"
+                html = generate_html_report(
+                    result=result,
+                    inputs_user=values,
+                    unit_system=self.current_unit_system,
+                    section_type=section_type,
+                    project_name="Proyecto",
+                    element_name=element_name,
+                )
+                file_prefix = "memoria_flexion_viga" if is_beam else "memoria_flexion_losa"
+            else:
+                if is_beam:
+                    values = self.beam_shear_inputs.get_values()
+                    result = BeamShearDesign(**values).design()
+                    html = generate_shear_beam_html_report(
+                        result=result,
+                        unit_system=self.current_unit_system,
+                        project_name="Proyecto",
+                        element_name="Viga V-1",
+                    )
+                    file_prefix = "memoria_cortante_viga"
+                else:
+                    values = self.slab_shear_inputs.get_values()
+                    result = SlabShearCheck(**values).check()
+                    html = generate_shear_slab_html_report(
+                        result=result,
+                        unit_system=self.current_unit_system,
+                        project_name="Proyecto",
+                        element_name="Losa L-1",
+                    )
+                    file_prefix = "memoria_cortante_losa"
 
-            html = generate_html_report(
-                result=result,
-                inputs_user=values,
-                unit_system=self.current_unit_system,
-                section_type=section_type,
-                project_name="Proyecto",
-                element_name=element_name,
-            )
-
-            # Sugerir nombre de archivo
-            default_name = f"memoria_{section_type.split()[0].lower()}.html"
+            default_name = f"{file_prefix}.html"
             home = os.path.expanduser("~")
             suggested_path = os.path.join(home, default_name)
 
@@ -240,16 +363,13 @@ class MainWindow(QMainWindow):
             )
 
             if not file_path:
-                # Cancelado: guardar en tmp y abrir
-                fd, file_path = tempfile.mkstemp(suffix=".html", prefix="memoria_")
+                fd, file_path = tempfile.mkstemp(suffix=".html", prefix=f"{file_prefix}_")
                 os.close(fd)
 
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(html)
 
-            # Abrir en navegador
             webbrowser.open(f"file://{file_path}")
-
             self.statusBar().showMessage(
                 f"Memoria guardada en: {file_path}", 6000
             )
