@@ -1,4 +1,4 @@
-"""Panel de resultados para diseño/revisión por cortante."""
+"""Panel de resultados para diseño/revisión por cortante y torsión."""
 from typing import Optional, Union
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from core.shear import BeamShearResult, SlabShearResult
+from core.torsion import BeamShearTorsionResult
 from core.units import get_converter, UnitSystem
 from ui.theme import PALETTE
 
@@ -18,6 +19,12 @@ def _force_in_user_unit(kn: float, cv) -> str:
     """Convierte kN a la unidad de fuerza del sistema actual."""
     value = kn / cv.force_to_kn
     return f"{value:.2f} {cv.force_unit}"
+
+
+def _moment_in_user_unit(knm: float, cv) -> str:
+    """Convierte kN·m a la unidad de momento del sistema actual."""
+    value = knm / cv.moment_to_knm
+    return f"{value:.2f} {cv.moment_unit}"
 
 
 class ShearResultsPanel(QWidget):
@@ -47,7 +54,10 @@ class ShearResultsPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        title_text = "📊 Cortante en losa" if self.is_slab else "📊 Cortante en viga"
+        title_text = (
+            "📊 Cortante en losa" if self.is_slab
+            else "📊 Cortante y torsión en viga"
+        )
         title = QLabel(title_text)
         title.setObjectName("panelTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -118,6 +128,8 @@ class ShearResultsPanel(QWidget):
             stir_group.setLayout(stir_layout)
             main_layout.addWidget(stir_group)
 
+            self._build_torsion_groups(main_layout)
+
         # --- Geometría ---
         geom_group = QGroupBox("Geometría calculada")
         geom_layout = QGridLayout()
@@ -139,6 +151,99 @@ class ShearResultsPanel(QWidget):
         main_layout.addWidget(self.warnings_label)
 
         main_layout.addStretch()
+
+    def _build_torsion_groups(self, main_layout):
+        """Grupos de torsión (sólo viga). Ocultos mientras no haya torsión."""
+        # --- Demanda vs capacidad a torsión ---
+        tor_group = QGroupBox("Torsión — Demanda vs Capacidad")
+        tor_layout = QGridLayout()
+        tor_layout.setVerticalSpacing(5)
+        self.tu_label = self._make_value_label("—")
+        self.phi_tth_label = self._make_value_label("—")
+        self.phi_tcr_label = self._make_value_label("—")
+        self.tu_design_label = self._make_value_label("—")
+        self.phi_tn_label = self._make_value_label("—")
+        self.torsion_ratio_label = self._make_value_label("—")
+        self.torsion_regime_label = self._make_value_label("—")
+
+        rows = [
+            ("Tu (demanda):", self.tu_label),
+            ("φTth (umbral, §22.7.4.1):", self.phi_tth_label),
+            ("φTcr (agrietamiento, §22.7.5.1):", self.phi_tcr_label),
+            ("Tu de diseño:", self.tu_design_label),
+            ("φTn (con s adoptado):", self.phi_tn_label),
+            ("φTn / Tu:", self.torsion_ratio_label),
+            ("Régimen:", self.torsion_regime_label),
+        ]
+        for row, (text, widget) in enumerate(rows):
+            tor_layout.addWidget(QLabel(text), row, 0)
+            tor_layout.addWidget(widget, row, 1)
+        tor_group.setLayout(tor_layout)
+        main_layout.addWidget(tor_group)
+        self.torsion_demand_group = tor_group
+
+        # --- Interacción V–T y refuerzo combinado ---
+        comb_group = QGroupBox("Refuerzo combinado V + T")
+        comb_layout = QGridLayout()
+        comb_layout.setVerticalSpacing(5)
+        self.section_check_label = self._make_value_label("—")
+        self.av_s_label = self._make_value_label("—")
+        self.at_s_label = self._make_value_label("—")
+        self.avt_s_label = self._make_value_label("—")
+        self.avt_s_min_label = self._make_value_label("—")
+        self.s_comb_label = self._make_value_label("—")
+        self.s_tor_max_label = self._make_value_label("—")
+
+        rows = [
+            ("Interacción sección (§22.7.7.1):", self.section_check_label),
+            ("Av/s (cortante):", self.av_s_label),
+            ("At/s (torsión, 1 rama):", self.at_s_label),
+            ("(Av+2At)/s requerido:", self.avt_s_label),
+            ("(Av+2At)/s mínimo (§9.6.4.2):", self.avt_s_min_label),
+            ("s por resistencia V+T:", self.s_comb_label),
+            ("s máx. torsión (§9.7.6.3.3):", self.s_tor_max_label),
+        ]
+        for row, (text, widget) in enumerate(rows):
+            comb_layout.addWidget(QLabel(text), row, 0)
+            comb_layout.addWidget(widget, row, 1)
+        comb_group.setLayout(comb_layout)
+        main_layout.addWidget(comb_group)
+        self.torsion_combined_group = comb_group
+
+        # --- Acero longitudinal por torsión ---
+        al_group = QGroupBox("Acero longitudinal por torsión")
+        al_layout = QGridLayout()
+        al_layout.setVerticalSpacing(5)
+        self.al_req_label = self._make_value_label("—")
+        self.al_min_label = self._make_value_label("—")
+        self.al_adopted_label = self._make_value_label("—")
+        self.al_adopted_label.setObjectName("asDesignLabel")
+        self.al_bars_label = self._make_value_label("—")
+
+        rows = [
+            ("Al requerido (§22.7.6.1b):", self.al_req_label),
+            ("Al mínimo (§9.6.4.3):", self.al_min_label),
+            ("Al ADOPTADO:", self.al_adopted_label),
+            ("Distribución sugerida:", self.al_bars_label),
+        ]
+        for row, (text, widget) in enumerate(rows):
+            al_layout.addWidget(QLabel(text), row, 0)
+            al_layout.addWidget(widget, row, 1)
+
+        al_note = QLabel(
+            "Al se reparte en el perímetro (≥1 barra por esquina, s ≤ 300 mm) y "
+            "se suma al acero de flexión en la zona de tensión."
+        )
+        al_note.setObjectName("infoLabel")
+        al_note.setWordWrap(True)
+        al_layout.addWidget(al_note, len(rows), 0, 1, 2)
+        al_group.setLayout(al_layout)
+        main_layout.addWidget(al_group)
+        self.torsion_long_group = al_group
+
+        for group in (self.torsion_demand_group, self.torsion_combined_group,
+                      self.torsion_long_group):
+            group.setVisible(False)
 
     def _make_value_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -172,15 +277,7 @@ class ShearResultsPanel(QWidget):
 
         ratio_text = f"{ratio:.2f}" if ratio != float("inf") else "∞"
         self.ratio_label.setText(ratio_text)
-        ratio_color = (
-            PALETTE.ok if (ratio == float("inf") or ratio >= 1.0) else PALETTE.error
-        )
-        self.ratio_label.setStyleSheet(
-            f"color: {ratio_color}; font-weight: bold;"
-            f"background-color: {PALETTE.bg_input};"
-            f"border: 1px solid {ratio_color}; border-radius: 3px;"
-            f"padding: 2px 6px;"
-        )
+        self._paint_ratio(self.ratio_label, ratio)
 
         # Estribos (sólo viga)
         if isinstance(result, BeamShearResult):
@@ -206,6 +303,10 @@ class ShearResultsPanel(QWidget):
             else:
                 self.s_adopted_label.setText("— (sin estribos)")
 
+        # Torsión (sólo viga)
+        if not self.is_slab:
+            self._display_torsion(result, cv)
+
         # Estado
         self._update_status_banner(result.status, result)
 
@@ -217,11 +318,91 @@ class ShearResultsPanel(QWidget):
         else:
             self.warnings_label.setVisible(False)
 
+    def _display_torsion(self, result: ShearResultT, cv):
+        """Llena (o esconde) los grupos de torsión."""
+        active = (
+            isinstance(result, BeamShearTorsionResult)
+            and result.torsion_active
+            and result.tu_knm > 0
+        )
+        negligible = active and result.torsion_regime == "DESPRECIABLE"
+
+        self.torsion_demand_group.setVisible(active)
+        self.torsion_combined_group.setVisible(active and not negligible)
+        self.torsion_long_group.setVisible(active and not negligible)
+        if not active:
+            return
+
+        self.tu_label.setText(_moment_in_user_unit(result.tu_knm, cv))
+        self.phi_tth_label.setText(_moment_in_user_unit(result.phi_t_th_knm, cv))
+        self.phi_tcr_label.setText(_moment_in_user_unit(result.phi_t_cr_knm, cv))
+        self.tu_design_label.setText(_moment_in_user_unit(result.tu_design_knm, cv))
+
+        if negligible:
+            self.torsion_regime_label.setText("Despreciable (Tu ≤ φTth)")
+            self.phi_tn_label.setText("—")
+            self.torsion_ratio_label.setText("—")
+            self._paint_ratio(self.torsion_ratio_label, float("inf"))
+            return
+
+        regime = "Diseño por torsión"
+        if result.redistributed:
+            regime = "Compatibilidad — Tu reducido a φTcr"
+        elif result.torsion_type == "COMPATIBILIDAD":
+            regime = "Compatibilidad (Tu ≤ φTcr)"
+        self.torsion_regime_label.setText(regime)
+
+        self.phi_tn_label.setText(_moment_in_user_unit(result.phi_tn_knm, cv))
+        self.torsion_ratio_label.setText(f"{result.torsion_ratio:.2f}")
+        self._paint_ratio(self.torsion_ratio_label, result.torsion_ratio)
+
+        # Interacción de la sección
+        self.section_check_label.setText(
+            f"{result.stress_demand_mpa:.2f} ≤ {result.stress_limit_mpa:.2f} MPa"
+        )
+        self._paint_ratio(
+            self.section_check_label, 1.0 if result.section_ok else 0.0
+        )
+
+        self.av_s_label.setText(f"{result.av_s_required:.4f} mm²/mm")
+        self.at_s_label.setText(f"{result.at_s_required:.4f} mm²/mm")
+        self.avt_s_label.setText(f"{result.avt_s_required:.4f} mm²/mm")
+        self.avt_s_min_label.setText(f"{result.avt_s_min:.4f} mm²/mm")
+        self.s_comb_label.setText(
+            cv.format_length_small(result.s_combined_required_mm, 1)
+            if result.s_combined_required_mm > 0 else "—"
+        )
+        self.s_tor_max_label.setText(
+            cv.format_length_small(result.s_torsion_max_mm, 1)
+        )
+
+        # Acero longitudinal
+        self.al_req_label.setText(cv.format_area(result.al_required_mm2 / 100.0))
+        self.al_min_label.setText(cv.format_area(result.al_min_mm2 / 100.0))
+        self.al_adopted_label.setText(cv.format_area(result.al_adopted_mm2 / 100.0))
+        if result.long_bars is not None:
+            bars = result.long_bars
+            self.al_bars_label.setText(
+                f"{bars.label} = {cv.format_area(bars.area_total_mm2 / 100.0)}"
+            )
+        else:
+            self.al_bars_label.setText("—")
+
+    def _paint_ratio(self, label: QLabel, ratio: float):
+        color = PALETTE.ok if (ratio == float("inf") or ratio >= 1.0) else PALETTE.error
+        label.setStyleSheet(
+            f"color: {color}; font-weight: bold;"
+            f"background-color: {PALETTE.bg_input};"
+            f"border: 1px solid {color}; border-radius: 3px;"
+            f"padding: 2px 6px;"
+        )
+
     def _regime_text(self, regime: str) -> str:
         return {
             "NO REQUIERE": "No requiere estribos",
             "MINIMO": "Estribos por mínimo",
             "DISEÑO": "Estribos por diseño",
+            "TORSION": "Estribos exigidos por torsión",
         }.get(regime, regime)
 
     def _update_status_banner(self, status: str, result: ShearResultT):
@@ -246,7 +427,17 @@ class ShearResultsPanel(QWidget):
         if not self.is_slab:
             labels += [self.phi_vn_label, self.regime_label, self.av_label,
                        self.vs_req_label, self.s_req_label, self.s_min_req_label,
-                       self.s_max_label, self.s_adopted_label]
+                       self.s_max_label, self.s_adopted_label,
+                       self.tu_label, self.phi_tth_label, self.phi_tcr_label,
+                       self.tu_design_label, self.phi_tn_label,
+                       self.torsion_ratio_label, self.torsion_regime_label,
+                       self.section_check_label, self.av_s_label, self.at_s_label,
+                       self.avt_s_label, self.avt_s_min_label, self.s_comb_label,
+                       self.s_tor_max_label, self.al_req_label, self.al_min_label,
+                       self.al_adopted_label, self.al_bars_label]
+            for group in (self.torsion_demand_group, self.torsion_combined_group,
+                          self.torsion_long_group):
+                group.setVisible(False)
         for lbl in labels:
             lbl.setText("—")
         self.status_label.setText("Estado: —")

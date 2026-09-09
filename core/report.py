@@ -16,6 +16,7 @@ from core.flexion import FlexionDesignResult, BeamSection, ReinforcementConfig
 from core.bar_tables import REBAR_SIZES
 from core.units import UnitSystem, get_converter
 from core.shear import BeamShearResult, SlabShearResult
+from core.torsion import BeamShearTorsionResult
 
 
 def _bar_label(db_mm: float) -> str:
@@ -850,8 +851,10 @@ table.data tr:nth-child(even) td { background: #f7f7f7; }
 """
 
 
-def _shear_envelope(body_inner: str, title: str, element_name: str) -> str:
-    """Plantilla HTML+MathJax común a las memorias de cortante."""
+def _shear_envelope(
+    body_inner: str, title: str, element_name: str, kind: str = "Cortante"
+) -> str:
+    """Plantilla HTML+MathJax común a las memorias de cortante y torsión."""
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -872,7 +875,7 @@ window.MathJax = {{
 </head>
 <body>
 <div class="print-bar">
-  <strong>📄 Memoria de Cálculo — Cortante</strong>
+  <strong>📄 Memoria de Cálculo — {kind}</strong>
   <button onclick="window.print()">🖨 Imprimir / Guardar PDF</button>
   <span style="margin-left:auto; font-size:10pt;">{element_name}</span>
 </div>
@@ -884,20 +887,231 @@ window.MathJax = {{
 """
 
 
-def generate_shear_beam_html_report(
+def _torsion_report_block(t: BeamShearTorsionResult, L, F, S, M, A) -> str:
+    """Sección 3 de la memoria: cálculos de torsión y combinación V + T."""
+    fc = t.fc_mpa
+    fyt = t.fyt_mpa
+    fy_l = t.fy_long_mpa
+    sqrt_fc = math.sqrt(fc) if fc > 0 else 0.0
+    tth_nmm = t.t_th_knm * 1e6
+    tcr_nmm = t.t_cr_knm * 1e6
+
+    header = f"""
+<h2>3. Cálculos de diseño (torsión)</h2>
+
+<h3>3.1 Torsión umbral $T_{{th}}$
+  <span class="aci-ref">ACI 318-19 §22.7.4.1</span>
+</h3>
+<p>Por debajo del umbral se permite despreciar los efectos de torsión:</p>
+<div class="step">
+  <div class="step-title">$T_{{th}} = 0.083\\,\\lambda \\sqrt{{f'_c}}
+    \\left(\\dfrac{{A_{{cp}}^2}}{{p_{{cp}}}}\\right)$</div>
+  $$T_{{th}} = 0.083 \\cdot {t.lam:.2f} \\cdot \\sqrt{{{fc:.1f}}} \\cdot
+    \\dfrac{{{t.acp_mm2:.0f}^2}}{{{t.pcp_mm:.0f}}}
+    = {tth_nmm:.0f}\\;\\text{{N·mm}} = {M(t.t_th_knm)}$$
+  $$\\phi T_{{th}} = 0.75 \\cdot T_{{th}} = {M(t.phi_t_th_knm)}$$
+</div>
+<table class="data">
+  <tr><td>$T_u$</td><td class="num">{M(t.tu_knm)}</td></tr>
+  <tr><td>$\\phi T_{{th}}$</td><td class="num">{M(t.phi_t_th_knm)}</td></tr>
+</table>
+"""
+
+    if t.torsion_regime != "DISEÑO":
+        return header + """
+<div class="result-summary ok">
+  <h3>Torsión despreciable</h3>
+  <p>$T_u \\le \\phi T_{th}$ — la torsión puede despreciarse (ACI 22.7.1.1) y el
+  armado transversal queda gobernado exclusivamente por el cortante.</p>
+</div>
+"""
+
+    tipo_txt = (
+        "Compatibilidad (estáticamente indeterminada)"
+        if t.torsion_type == "COMPATIBILIDAD" else "Equilibrio (estáticamente determinada)"
+    )
+    if t.redistributed:
+        redistrib_txt = (
+            f"Como $T_u > \\phi T_{{cr}}$ y la torsión es por compatibilidad, se "
+            f"reduce el torsor de diseño a $\\phi T_{{cr}} = {M(t.phi_t_cr_knm)}$ "
+            f"(ACI 22.7.3.2)."
+        )
+    elif t.torsion_type == "COMPATIBILIDAD":
+        redistrib_txt = (
+            "La torsión es por compatibilidad pero $T_u \\le \\phi T_{cr}$, "
+            "por lo que no procede reducción alguna."
+        )
+    else:
+        redistrib_txt = (
+            "La torsión es de equilibrio: no se admite redistribución y se diseña "
+            "para el $T_u$ completo (ACI 22.7.3.1)."
+        )
+
+    sec_ok = t.section_ok
+    at_s_floor = 0.175 * t.b_mm / fyt
+
+    long_bars_html = ""
+    if t.long_bars is not None:
+        lb = t.long_bars
+        long_bars_html = f"""
+<p>Distribución sugerida (ACI 9.7.5.1: separación perimetral ≤ 300 mm,
+$d_b \\ge \\max(0.042\\,s,\\,\\#3)$, al menos una barra en cada esquina):</p>
+<table class="data">
+  <tr><td>Número de barras</td><td class="num">{lb.n_bars}</td></tr>
+  <tr><td>Diámetro</td><td class="num">#{lb.bar_number} ({lb.bar_diameter_mm:.2f} mm)</td></tr>
+  <tr><td>Separación perimetral</td><td class="num">{lb.spacing_mm:.0f} mm</td></tr>
+  <tr><td><b>Área provista</b></td><td class="num"><b>{A(lb.area_total_mm2)}</b></td></tr>
+</table>
+"""
+
+    return header + f"""
+<h3>3.2 Tipo de torsión y torsor de diseño
+  <span class="aci-ref">ACI 318-19 §22.7.3 / §22.7.5.1</span>
+</h3>
+<p>Tipo declarado: <b>{tipo_txt}</b>.</p>
+<div class="step">
+  <div class="step-title">Torsión de agrietamiento</div>
+  $$T_{{cr}} = 0.33\\,\\lambda \\sqrt{{f'_c}}
+    \\left(\\dfrac{{A_{{cp}}^2}}{{p_{{cp}}}}\\right)
+    = {tcr_nmm:.0f}\\;\\text{{N·mm}} = {M(t.t_cr_knm)}$$
+  $$\\phi T_{{cr}} = {M(t.phi_t_cr_knm)}$$
+</div>
+<p>{redistrib_txt}</p>
+<table class="data">
+  <tr><td><b>$T_u$ de diseño</b></td>
+      <td class="num"><b>{M(t.tu_design_knm)}</b></td></tr>
+</table>
+
+<h3>3.3 Límite de dimensiones de la sección
+  <span class="aci-ref">ACI 318-19 §22.7.7.1</span>
+</h3>
+<p>Se limita el esfuerzo combinado de cortante y torsión para controlar el
+aplastamiento del concreto:</p>
+<div class="step">
+  $$\\sqrt{{\\left(\\dfrac{{V_u}}{{b_w d}}\\right)^2 +
+    \\left(\\dfrac{{T_u p_h}}{{1.7 A_{{oh}}^2}}\\right)^2}}
+    \\le \\phi\\left(\\dfrac{{V_c}}{{b_w d}} + 0.66\\sqrt{{f'_c}}\\right)$$
+  $$\\sqrt{{\\left({(t.vu_kn * 1000.0 / (t.b_mm * t.d_mm)):.3f}\\right)^2 +
+    \\left({(t.tu_design_knm * 1e6 * t.ph_mm / (1.7 * t.aoh_mm2 ** 2)):.3f}\\right)^2}}
+    = {t.stress_demand_mpa:.3f}\\;\\text{{MPa}}
+    \\quad\\le\\quad {t.stress_limit_mpa:.3f}\\;\\text{{MPa}}$$
+</div>
+<table class="data">
+  <tr><td>Esfuerzo combinado (demanda)</td>
+      <td class="num">{t.stress_demand_mpa:.3f} MPa</td></tr>
+  <tr><td>Límite $\\phi(V_c/(b_w d) + 0.66\\sqrt{{f'_c}})$</td>
+      <td class="num">{t.stress_limit_mpa:.3f} MPa</td></tr>
+  <tr><td><b>Verificación</b></td>
+      <td class="num"><span class="chip {'ok' if sec_ok else 'fail'}">
+      {'CUMPLE' if sec_ok else 'NO CUMPLE — AUMENTAR SECCIÓN'}</span></td></tr>
+</table>
+
+<h3>3.4 Refuerzo transversal por torsión
+  <span class="aci-ref">ACI 318-19 §22.7.6.1a</span>
+</h3>
+<div class="step">
+  <div class="step-title">$T_n = \\dfrac{{2 A_o A_t f_{{yt}}}}{{s}}\\cot\\theta$
+    &nbsp;→&nbsp; $\\dfrac{{A_t}}{{s}} = \\dfrac{{T_u/\\phi}}{{2 A_o f_{{yt}} \\cot\\theta}}$</div>
+  $$\\dfrac{{A_t}}{{s}} =
+    \\dfrac{{{t.tu_design_knm * 1e6 / 0.75:.0f}}}
+           {{2 \\cdot {t.ao_mm2:.0f} \\cdot {fyt:.1f} \\cdot \\cot {t.theta_deg:.0f}°}}
+    = {t.at_s_required:.4f}\\;\\text{{mm}}^2/\\text{{mm}}$$
+</div>
+<p>$A_t$ corresponde a <b>una rama</b> del estribo cerrado más exterior.</p>
+
+<h3>3.5 Refuerzo transversal combinado $V + T$
+  <span class="aci-ref">ACI 318-19 §9.6.4.2 / §9.7.6.3.3</span>
+</h3>
+<div class="step">
+  <div class="step-title">Demanda combinada</div>
+  $$\\dfrac{{A_v + 2A_t}}{{s}} = {t.av_s_required:.4f} + 2({t.at_s_required:.4f})
+    = {t.avt_s_required:.4f}\\;\\text{{mm}}^2/\\text{{mm}}$$
+  $$\\left(\\dfrac{{A_v + 2A_t}}{{s}}\\right)_{{min}} =
+    \\max\\!\\left(\\dfrac{{0.062\\sqrt{{f'_c}}}}{{f_{{yt}}}},\\;
+    \\dfrac{{0.35}}{{f_{{yt}}}}\\right) b_w
+    = {t.avt_s_min:.4f}\\;\\text{{mm}}^2/\\text{{mm}}$$
+</div>
+<p>Sólo las dos ramas exteriores del estribo cerrado son efectivas en torsión,
+mientras que todas las ramas trabajan en cortante. La separación por resistencia
+se obtiene entonces exigiendo, por rama exterior:</p>
+<div class="step">
+  $$\\dfrac{{A_b}}{{s}} \\ge \\dfrac{{A_t}}{{s}} + \\dfrac{{A_v/s}}{{n_{{ramas}}}}
+    = {t.at_s_required:.4f} + \\dfrac{{{t.av_s_required:.4f}}}{{{t.stirrup_legs}}}
+    \\;\\Rightarrow\\; s \\le {L(t.s_combined_required_mm, 1)}$$
+</div>
+<table class="data">
+  <tr><td>$s$ por resistencia combinada $V+T$</td>
+      <td class="num">{L(t.s_combined_required_mm, 1)}</td></tr>
+  <tr><td>$s$ por refuerzo mínimo <span class="aci-ref">§9.6.4.2</span></td>
+      <td class="num">{L(t.s_min_required_mm, 1) if t.s_min_required_mm > 0 else '—'}</td></tr>
+  <tr><td>$s_{{max}}$ por cortante <span class="aci-ref">§9.7.6.2.2</span></td>
+      <td class="num">{L(t.s_shear_only_max_mm, 1)}</td></tr>
+  <tr><td>$s_{{max}}$ por torsión $=\\min(p_h/8,\\,300)$
+      <span class="aci-ref">§9.7.6.3.3</span></td>
+      <td class="num">{L(t.s_torsion_max_mm, 1)}</td></tr>
+  <tr><td><b>$s$ ADOPTADO</b></td>
+      <td class="num"><b>{L(t.s_adopted_mm, 1)}</b></td></tr>
+  <tr><td>$(A_v + 2A_t)/s$ provisto</td>
+      <td class="num">{t.avt_s_provided:.4f} mm²/mm</td></tr>
+</table>
+
+<h3>3.6 Refuerzo longitudinal por torsión
+  <span class="aci-ref">ACI 318-19 §22.7.6.1b / §9.6.4.3</span>
+</h3>
+<div class="step">
+  <div class="step-title">$A_l = \\dfrac{{A_t}}{{s}} p_h
+    \\left(\\dfrac{{f_{{yt}}}}{{f_y}}\\right)\\cot^2\\theta$</div>
+  $$A_l = {t.at_s_required:.4f} \\cdot {t.ph_mm:.0f} \\cdot
+    \\dfrac{{{fyt:.1f}}}{{{fy_l:.1f}}} \\cdot \\cot^2 {t.theta_deg:.0f}°
+    = {t.al_required_mm2:.1f}\\;\\text{{mm}}^2 = {A(t.al_required_mm2)}$$
+</div>
+<div class="step">
+  <div class="step-title">Mínimo (ACI 9.6.4.3), con
+    $A_t/s \\ge 0.175 b_w / f_{{yt}} = {at_s_floor:.4f}$</div>
+  $$A_{{l,min}} = \\dfrac{{0.42\\sqrt{{f'_c}}\\,A_{{cp}}}}{{f_y}}
+    - \\left(\\dfrac{{A_t}}{{s}}\\right) p_h \\dfrac{{f_{{yt}}}}{{f_y}}
+    = \\dfrac{{0.42 \\cdot {sqrt_fc:.3f} \\cdot {t.acp_mm2:.0f}}}{{{fy_l:.1f}}}
+    - \\dots = {t.al_min_mm2:.1f}\\;\\text{{mm}}^2 = {A(t.al_min_mm2)}$$
+</div>
+<table class="data">
+  <tr><td>$A_l$ por resistencia</td><td class="num">{A(t.al_required_mm2)}</td></tr>
+  <tr><td>$A_{{l,min}}$</td><td class="num">{A(t.al_min_mm2)}</td></tr>
+  <tr><td><b>$A_l$ ADOPTADO $=\\max$</b></td>
+      <td class="num"><b>{A(t.al_adopted_mm2)}</b></td></tr>
+</table>
+{long_bars_html}
+"""
+
+
+def generate_shear_torsion_beam_html_report(
     result: BeamShearResult,
     unit_system: UnitSystem,
     project_name: str = "Proyecto sin título",
     element_name: str = "Viga V-1",
     designer: str = "",
 ) -> str:
-    """Memoria de cálculo de cortante en viga (modo diseño)."""
+    """Memoria de cálculo de cortante (y torsión, si aplica) en viga.
+
+    Acepta tanto un :class:`~core.shear.BeamShearResult` como el resultado
+    combinado :class:`~core.torsion.BeamShearTorsionResult`; las secciones de
+    torsión sólo aparecen cuando ésta se incluyó en el diseño.
+    """
     cv = get_converter(unit_system)
     fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     L = lambda mm, d=1: cv.format_length_small(mm, d)
     F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
     S = lambda mpa, d=1: f"{mpa / cv.stress_to_mpa:.{d}f} {cv.stress_unit}"
+    M = lambda knm, d=2: f"{knm / cv.moment_to_knm:.{d}f} {cv.moment_unit}"
+    A = lambda mm2, d=2: cv.format_area(mm2 / 100.0, d)
+
+    torsion = (
+        result
+        if isinstance(result, BeamShearTorsionResult)
+        and result.torsion_active and result.tu_knm > 0
+        else None
+    )
+    tor_design = torsion is not None and torsion.torsion_regime == "DISEÑO"
 
     fc = result.fc_mpa
     fyt = result.fyt_mpa
@@ -925,6 +1139,7 @@ def generate_shear_beam_html_report(
         "NO REQUIERE": "No requiere estribos",
         "MINIMO": "Estribos por mínimo (Av,min)",
         "DISEÑO": "Estribos por diseño",
+        "TORSION": "Sin exigencia por cortante; estribos exigidos por torsión",
     }.get(result.regime, result.regime)
 
     cap_ratio = (result.phi_vn_kn / result.vu_kn) if result.vu_kn > 0 else float("inf")
@@ -972,6 +1187,13 @@ $V_s \\le 0.66\\sqrt{{f'_c}}\\,b_w d = {vs_lim_n:.0f}\\;\\text{{N}} = {F(result.
 <p>$0.5 \\phi V_c < V_u \\le \\phi V_c$ — no se requiere Vs por resistencia; se
 adopta el armado mínimo por cortante.</p>
 """
+    elif result.regime == "TORSION":
+        vs_block = """
+<h3>2.4 Régimen</h3>
+<p>$V_u \\le 0.5 \\phi V_c$ — el cortante por sí solo no exigiría estribos, pero
+la torsión sí los requiere. La separación adoptada proviene de la combinación
+$V + T$ de la sección 3.</p>
+"""
     else:
         vs_block = """
 <h3>2.4 Régimen</h3>
@@ -994,10 +1216,91 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
     else:
         adopted_row = ""
 
+    # ----- Bloques específicos de torsión -----
+    tu_row = ""
+    fy_long_row = ""
+    section_props_block = ""
+    torsion_block = ""
+    torsion_result_rows = ""
+    torsion_summary_rows = ""
+    sec_result = "3"
+    sec_summary = "4"
+
+    if torsion is not None:
+        t = torsion
+        tipo_txt = (
+            "Compatibilidad (redistribuible)"
+            if t.torsion_type == "COMPATIBILIDAD" else "Equilibrio (no redistribuible)"
+        )
+        tu_row = (
+            f'<tr><td>Torsor último</td><td>$T_u$</td>'
+            f'<td class="num">{M(t.tu_knm)}</td></tr>\n'
+            f'<tr><td>Tipo de torsión <span class="aci-ref">ACI 22.7.3</span></td>'
+            f'<td>—</td><td class="num">{tipo_txt}</td></tr>'
+        )
+        fy_long_row = (
+            f'<tr><td>Fluencia del acero longitudinal</td><td>$f_y$</td>'
+            f'<td class="num">{S(t.fy_long_mpa)}</td></tr>'
+        )
+        section_props_block = f"""
+<h3>1.5 Propiedades de la sección para torsión</h3>
+<table class="data">
+  <tr><td>Área encerrada por el perímetro exterior</td><td>$A_{{cp}} = b\\,h$</td>
+      <td class="num">{t.acp_mm2:,.0f} mm²</td></tr>
+  <tr><td>Perímetro exterior</td><td>$p_{{cp}} = 2(b+h)$</td>
+      <td class="num">{t.pcp_mm:,.0f} mm</td></tr>
+  <tr><td>Área encerrada por el eje del estribo</td><td>$A_{{oh}}$</td>
+      <td class="num">{t.aoh_mm2:,.0f} mm²</td></tr>
+  <tr><td>Perímetro del eje del estribo</td><td>$p_h$</td>
+      <td class="num">{t.ph_mm:,.0f} mm</td></tr>
+  <tr><td>Área bruta del flujo cortante</td><td>$A_o = 0.85\\,A_{{oh}}$</td>
+      <td class="num">{t.ao_mm2:,.0f} mm²</td></tr>
+  <tr><td>Ángulo de las bielas</td><td>$\\theta$</td>
+      <td class="num">{t.theta_deg:.0f}°</td></tr>
+</table>
+"""
+        torsion_block = _torsion_report_block(t, L, F, S, M, A)
+        sec_result = "4"
+        sec_summary = "5"
+
+        if tor_design:
+            tor_ok = t.torsion_ratio >= 1.0
+            torsion_result_rows = f"""
+<tr><td>$\\phi T_n = \\phi\\,\\dfrac{{2 A_o A_t f_{{yt}} \\cot\\theta}}{{s}}$ con $s$ adoptado</td>
+    <td class="num">{M(t.phi_tn_knm)}</td></tr>
+<tr><td>Relación $\\phi T_n / T_u$</td>
+    <td class="num">{t.torsion_ratio:.3f}
+      <span class="chip {'ok' if tor_ok else 'fail'}">
+      {'CUMPLE' if tor_ok else 'NO CUMPLE'}</span></td></tr>
+<tr><td><b>$A_l$ ADOPTADO</b> <span class="aci-ref">ACI 22.7.6.1b / 9.6.4.3</span></td>
+    <td class="num"><b>{A(t.al_adopted_mm2)}</b></td></tr>
+"""
+            if t.long_bars is not None:
+                torsion_result_rows += (
+                    f'<tr><td>Distribución sugerida de $A_l$</td>'
+                    f'<td class="num"><b>{t.long_bars.label}</b> = '
+                    f'{A(t.long_bars.area_total_mm2)} '
+                    f'(s ≈ {t.long_bars.spacing_mm:.0f} mm)</td></tr>\n'
+                )
+            torsion_summary_rows = f"""
+    <tr><td>$T_u$</td><td class="num">{M(t.tu_knm)}</td>
+        <td>$\\phi T_n$</td><td class="num"><b>{M(t.phi_tn_knm)}</b></td></tr>
+    <tr><td>$A_l$</td>
+        <td class="num"><b>{A(t.al_adopted_mm2)}</b></td>
+        <td>$\\phi T_n / T_u$</td><td class="num"><b>{t.torsion_ratio:.2f}</b></td></tr>
+"""
+        else:
+            torsion_summary_rows = f"""
+    <tr><td>$T_u$</td><td class="num">{M(t.tu_knm)}</td>
+        <td>$\\phi T_{{th}}$</td><td class="num">{M(t.phi_t_th_knm)}</td></tr>
+    <tr><td colspan="4">Torsión despreciable: $T_u \\le \\phi T_{{th}}$
+        (ACI 22.7.4.1) — no requiere refuerzo por torsión.</td></tr>
+"""
+
     body = f"""
 <div class="doc-header">
   <h1>Memoria de Cálculo</h1>
-  <p class="subtitle">Diseño por cortante en viga según ACI 318-19</p>
+  <p class="subtitle">Diseño por cortante{" y torsión" if torsion is not None else ""} en viga según ACI 318-19</p>
 </div>
 
 <div class="metadata">
@@ -1014,6 +1317,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
 <h3>1.1 Solicitación</h3>
 <table class="data">
   <tr><td>Cortante último</td><td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+  {tu_row}
 </table>
 
 <h3>1.2 Geometría</h3>
@@ -1028,6 +1332,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
 <table class="data">
   <tr><td>Resistencia del concreto</td><td>$f'_c$</td><td class="num">{S(fc)}</td></tr>
   <tr><td>Fluencia del estribo</td><td>$f_{{yt}}$</td><td class="num">{S(fyt)}</td></tr>
+  {fy_long_row}
   <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>
 </table>
 
@@ -1037,8 +1342,8 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
   <tr><td>Número de ramas</td><td>$n$</td><td class="num">{result.stirrup_legs}</td></tr>
   <tr><td>Área total de ramas</td><td>$A_v = n \\cdot A_b$</td><td class="num">{av:.1f} mm²</td></tr>
 </table>
-
-<h2>2. Cálculos de diseño</h2>
+{section_props_block}
+<h2>2. Cálculos de diseño (cortante)</h2>
 
 <h3>2.1 Resistencia del concreto $V_c$
   <span class="aci-ref">ACI 318-19 §22.5.5.1 (simplificada)</span>
@@ -1084,8 +1389,8 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
      \\end{{cases}}$$
   $$s_{{max}} = {L(result.s_max_mm, 1)}$$
 </div>
-
-<h2>3. Resultado del diseño</h2>
+{torsion_block}
+<h2>{sec_result}. Resultado del diseño</h2>
 <table class="data">
 {adopted_row}
 <tr><td>$\\phi V_n = \\phi(V_c + V_s)$ con $s$ adoptado</td>
@@ -1093,11 +1398,12 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
 <tr><td>Relación $\\phi V_n / V_u$</td>
     <td class="num">{cap_ratio_str}
       <span class="chip {cap_class}">{cap_text}</span></td></tr>
+{torsion_result_rows}
 </table>
 
 {warnings_html}
 
-<h2>4. Resumen</h2>
+<h2>{sec_summary}. Resumen</h2>
 <div class="result-summary {status_class}">
   <h3>Estado: {result.status}</h3>
   <table class="data" style="margin-top: 8px;">
@@ -1108,6 +1414,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
     <tr><td>$s$ adoptado</td>
         <td><b>{L(result.s_adopted_mm, 1) if result.s_adopted_mm > 0 else '—'}</b></td>
         <td>$\\phi V_n$</td><td class="num"><b>{F(result.phi_vn_kn)}</b></td></tr>
+{torsion_summary_rows}
   </table>
 </div>
 
@@ -1116,7 +1423,14 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
   Diseño conforme a ACI 318-19 — {fecha}</p>
 </div>
 """
-    return _shear_envelope(body, f"Memoria — Cortante {element_name}", element_name)
+    kind = "Cortante y Torsión" if torsion is not None else "Cortante"
+    return _shear_envelope(
+        body, f"Memoria — {kind} {element_name}", element_name, kind=kind
+    )
+
+
+# Alias retrocompatible: la memoria de viga cubre cortante y, si aplica, torsión.
+generate_shear_beam_html_report = generate_shear_torsion_beam_html_report
 
 
 def generate_shear_slab_html_report(

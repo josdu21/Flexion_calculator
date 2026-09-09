@@ -236,6 +236,24 @@ QGroupBox::title {{
     font-size: 10pt;
 }}
 
+/* Grupos activables (p. ej. "Torsión") y casillas en general */
+QGroupBox::indicator, QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {p.border};
+    border-radius: 3px;
+    background-color: {p.bg_input};
+}}
+
+QGroupBox::indicator:hover, QCheckBox::indicator:hover {{
+    border: 1px solid {p.border_focus};
+}}
+
+QGroupBox::indicator:checked, QCheckBox::indicator:checked {{
+    background-color: {p.accent};
+    border: 1px solid {p.accent};
+}}
+
 #panelTitle {{
     font-size: 13pt;
     font-weight: bold;

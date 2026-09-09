@@ -1,4 +1,4 @@
-"""Paneles de entrada para diseño por cortante (viga y losa)."""
+"""Paneles de entrada para diseño por cortante y torsión (viga y losa)."""
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QDoubleSpinBox,
     QGridLayout, QGroupBox, QSpinBox, QComboBox,
@@ -37,6 +37,15 @@ def _range_vu(unit_system: UnitSystem):
     if unit_system == UnitSystem.ENGLISH:
         return (0.0, 2000.0)        # kip
     return (0.0, 10000.0)           # kN
+
+
+def _default_tu(unit_system: UnitSystem) -> float:
+    """Torsor último razonable por sistema (orden de magnitud de Mu/10)."""
+    if unit_system == UnitSystem.MKS:
+        return 2.0           # tonf·m
+    if unit_system == UnitSystem.ENGLISH:
+        return 15.0          # kip·ft
+    return 20.0              # kN·m (SI)
 
 
 def _make_spinbox(value, rng, decimals, step):
@@ -78,7 +87,11 @@ def _clear_layout(layout):
 # ============================================================
 
 class BeamShearInputPanel(QWidget):
-    """Inputs para diseño por cortante en viga (modo: dado Vu, calcular s)."""
+    """Inputs para diseño por cortante y torsión en viga.
+
+    Modo: dados Vu y (opcionalmente) Tu, calcular la separación de estribos
+    cerrados y el acero longitudinal por torsión.
+    """
 
     values_changed = pyqtSignal()
 
@@ -95,7 +108,7 @@ class BeamShearInputPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        title = QLabel("✂  Viga — Diseño por cortante")
+        title = QLabel("✂  Viga — Cortante y torsión")
         title.setObjectName("panelTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
@@ -116,6 +129,48 @@ class BeamShearInputPanel(QWidget):
         _add_field(load_layout, 0, "Vu", cv.force_unit, self.vu_spinbox)
         load_group.setLayout(load_layout)
         main_layout.addWidget(load_group)
+
+        # Torsión (grupo activable)
+        self.torsion_group = QGroupBox("Torsión  (ACI 318-19 §22.7)")
+        self.torsion_group.setCheckable(True)
+        self.torsion_group.setChecked(False)
+        self.torsion_group.toggled.connect(self._emit_if_ready)
+        tor_layout = QGridLayout()
+        tor_layout.setVerticalSpacing(6)
+
+        default_tu = _default_tu(self.unit_system)
+        self.tu_spinbox = _make_spinbox(
+            value=default_tu,
+            rng=(0.0, cv.range_mu[1]),
+            decimals=cv.decimals_moment,
+            step=max(0.1, default_tu * 0.05),
+        )
+        _add_field(tor_layout, 0, "Tu", cv.moment_unit, self.tu_spinbox)
+
+        tor_layout.addWidget(QLabel("Tipo de torsión:"), 1, 0)
+        self.torsion_type_combo = QComboBox()
+        self.torsion_type_combo.addItem("Equilibrio (no redistribuible)", "EQUILIBRIO")
+        self.torsion_type_combo.addItem("Compatibilidad (redistribuible)", "COMPATIBILIDAD")
+        self.torsion_type_combo.currentIndexChanged.connect(self._emit_if_ready)
+        tor_layout.addWidget(self.torsion_type_combo, 1, 1, 1, 2)
+
+        self.fy_long_spinbox = _make_spinbox(
+            value=cv.default_fy, rng=cv.range_fy,
+            decimals=cv.decimals_stress,
+            step=max(1.0, cv.default_fy * 0.05),
+        )
+        _add_field(tor_layout, 2, "fy (long. torsión)", cv.stress_unit, self.fy_long_spinbox)
+
+        tor_note = QLabel(
+            "En torsión por compatibilidad, Tu puede reducirse a φTcr "
+            "(§22.7.3.2). Requiere estribos cerrados y acero longitudinal Al."
+        )
+        tor_note.setObjectName("infoLabel")
+        tor_note.setWordWrap(True)
+        tor_layout.addWidget(tor_note, 3, 0, 1, 3)
+
+        self.torsion_group.setLayout(tor_layout)
+        main_layout.addWidget(self.torsion_group)
 
         # Geometría
         geom_group = QGroupBox("Geometría")
@@ -196,7 +251,10 @@ class BeamShearInputPanel(QWidget):
         self.db_long_combo.currentIndexChanged.connect(self._emit_if_ready)
         stirrup_layout.addWidget(self.db_long_combo, 2, 1, 1, 2)
 
-        note = QLabel("ACI 318-19 §22.5 / §9.6.3 / §9.7.6.2.2. φ = 0.75, λ = 1.0.")
+        note = QLabel(
+            "ACI 318-19 §22.5 / §9.6.3 / §9.7.6.2.2 (cortante) y §22.7 / §9.6.4 / "
+            "§9.7.6.3 (torsión). φ = 0.75, λ = 1.0, θ = 45°."
+        )
         note.setObjectName("infoLabel")
         note.setWordWrap(True)
         stirrup_layout.addWidget(note, 3, 0, 1, 3)
@@ -208,8 +266,9 @@ class BeamShearInputPanel(QWidget):
         self._connect_signals()
 
     def _connect_signals(self):
-        for sb in [self.vu_spinbox, self.b_spinbox, self.h_spinbox,
-                   self.cover_spinbox, self.fc_spinbox, self.fyt_spinbox]:
+        for sb in [self.vu_spinbox, self.tu_spinbox, self.b_spinbox, self.h_spinbox,
+                   self.cover_spinbox, self.fc_spinbox, self.fyt_spinbox,
+                   self.fy_long_spinbox]:
             sb.valueChanged.connect(self._emit_if_ready)
 
     def _emit_if_ready(self):
@@ -221,11 +280,18 @@ class BeamShearInputPanel(QWidget):
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
         self.unit_system = unit_system
+        # El modo (con/sin torsión) sobrevive al cambio de unidades
+        torsion_on = self.torsion_group.isChecked()
+        torsion_type = self.torsion_type_combo.currentData()
         old_layout = self.layout()
         if old_layout is not None:
             _clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
+        self.torsion_group.setChecked(torsion_on)
+        idx = self.torsion_type_combo.findData(torsion_type)
+        if idx >= 0:
+            self.torsion_type_combo.setCurrentIndex(idx)
         self._building = False
         self.values_changed.emit()
 
@@ -244,6 +310,9 @@ class BeamShearInputPanel(QWidget):
         db_long_n = self.db_long_combo.currentData()
         db_long = get_rebar_by_number(db_long_n)
 
+        torsion_on = self.torsion_group.isChecked()
+        tu_nmm = self.tu_spinbox.value() * cv.moment_to_knm * 1e6
+
         return {
             "vu_n": vu_n,
             "b_mm": b_mm,
@@ -256,6 +325,10 @@ class BeamShearInputPanel(QWidget):
             "stirrup_legs": legs,
             "db_long_assumed_mm": db_long.diameter_mm,
             "lam": 1.0,
+            "torsion_enabled": torsion_on,
+            "tu_nmm": tu_nmm if torsion_on else 0.0,
+            "fy_long_mpa": self.fy_long_spinbox.value() * cv.stress_to_mpa,
+            "torsion_type": self.torsion_type_combo.currentData(),
         }
 
 

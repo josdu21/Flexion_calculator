@@ -1,4 +1,4 @@
-"""Ventana principal de la Calculadora de Acero (Flexión + Cortante)."""
+"""Ventana principal de la Calculadora de Acero (Flexión + Cortante + Torsión)."""
 import os
 import tempfile
 import webbrowser
@@ -11,10 +11,11 @@ from PyQt6.QtCore import Qt
 
 from core.units import UnitSystem
 from core.flexion import BeamSection
-from core.shear import BeamShearDesign, SlabShearCheck
+from core.shear import SlabShearCheck
+from core.torsion import BeamShearTorsionDesign
 from core.report import (
     generate_html_report,
-    generate_shear_beam_html_report,
+    generate_shear_torsion_beam_html_report,
     generate_shear_slab_html_report,
 )
 from ui.input_panel import InputPanel
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
         self._initializing = True
         self._init_ui()
         self.setWindowTitle(
-            "Calculadora de Acero por Flexión y Cortante — ACI 318-19"
+            "Calculadora de Acero por Flexión, Cortante y Torsión — ACI 318-19"
         )
         self.resize(1240, 800)
         self.setMinimumSize(960, 640)
@@ -61,7 +62,7 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(0, 8, 0, 8)
         header_layout.setSpacing(0)
 
-        title = QLabel("🏗  Calculadora de Acero — Flexión y Cortante")
+        title = QLabel("🏗  Calculadora de Acero — Flexión, Cortante y Torsión")
         title.setObjectName("headerTitle")
         header_layout.addWidget(title)
 
@@ -126,7 +127,8 @@ class MainWindow(QMainWindow):
 
         sub_tabs = QTabWidget()
         sub_tabs.addTab(self._make_flexion_subtab(is_slab), "Flexión")
-        sub_tabs.addTab(self._make_shear_subtab(is_slab), "Cortante")
+        shear_label = "Cortante" if is_slab else "Cortante y Torsión"
+        sub_tabs.addTab(self._make_shear_subtab(is_slab), shear_label)
         layout.addWidget(sub_tabs)
 
         if is_slab:
@@ -284,10 +286,11 @@ class MainWindow(QMainWindow):
             return
         try:
             values = self.beam_shear_inputs.get_values()
-            result = BeamShearDesign(**values).design()
+            result = BeamShearTorsionDesign(**values).design()
             self.beam_shear_results.display_results(result)
+            label = "cortante + torsión" if result.torsion_active else "cortante"
             self.statusBar().showMessage(
-                f"Viga (cortante) • Estado: {result.status}", 3000
+                f"Viga ({label}) • Estado: {result.status}", 3000
             )
         except Exception as e:
             self.beam_shear_results.clear()
@@ -333,14 +336,17 @@ class MainWindow(QMainWindow):
             else:
                 if is_beam:
                     values = self.beam_shear_inputs.get_values()
-                    result = BeamShearDesign(**values).design()
-                    html = generate_shear_beam_html_report(
+                    result = BeamShearTorsionDesign(**values).design()
+                    html = generate_shear_torsion_beam_html_report(
                         result=result,
                         unit_system=self.current_unit_system,
                         project_name="Proyecto",
                         element_name="Viga V-1",
                     )
-                    file_prefix = "memoria_cortante_viga"
+                    file_prefix = (
+                        "memoria_cortante_torsion_viga" if result.torsion_active
+                        else "memoria_cortante_viga"
+                    )
                 else:
                     values = self.slab_shear_inputs.get_values()
                     result = SlabShearCheck(**values).check()
