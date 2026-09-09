@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
+from ui.form_helpers import make_panel_tabs, tab_page
 
 
 STIRRUP_BAR_NUMBERS = [2, 3, 4, 5]
@@ -128,7 +129,6 @@ class BeamShearInputPanel(QWidget):
         )
         _add_field(load_layout, 0, "Vu", cv.force_unit, self.vu_spinbox)
         load_group.setLayout(load_layout)
-        main_layout.addWidget(load_group)
 
         # Torsión (grupo activable)
         self.torsion_group = QGroupBox("Torsión  (ACI 318-19 §22.7)")
@@ -170,7 +170,6 @@ class BeamShearInputPanel(QWidget):
         tor_layout.addWidget(tor_note, 3, 0, 1, 3)
 
         self.torsion_group.setLayout(tor_layout)
-        main_layout.addWidget(self.torsion_group)
 
         # Geometría
         geom_group = QGroupBox("Geometría")
@@ -195,7 +194,6 @@ class BeamShearInputPanel(QWidget):
         )
         _add_field(geom_layout, 2, "Recubrimiento", cv.length_unit, self.cover_spinbox)
         geom_group.setLayout(geom_layout)
-        main_layout.addWidget(geom_group)
 
         # Materiales
         mat_group = QGroupBox("Materiales")
@@ -215,7 +213,6 @@ class BeamShearInputPanel(QWidget):
         )
         _add_field(mat_layout, 1, "fyt (estribo)", cv.stress_unit, self.fyt_spinbox)
         mat_group.setLayout(mat_layout)
-        main_layout.addWidget(mat_group)
 
         # Estribo propuesto
         stirrup_group = QGroupBox("Estribo propuesto")
@@ -260,10 +257,27 @@ class BeamShearInputPanel(QWidget):
         stirrup_layout.addWidget(note, 3, 0, 1, 3)
 
         stirrup_group.setLayout(stirrup_layout)
-        main_layout.addWidget(stirrup_group)
 
-        main_layout.addStretch()
+        # Los grupos se reparten en pestañas para no apilarlos en una columna
+        self.input_tabs = make_panel_tabs()
+        self.input_tabs.addTab(tab_page(load_group, geom_group, mat_group), "Sección")
+        self.input_tabs.addTab(tab_page(stirrup_group), "Refuerzo")
+        self.torsion_page = tab_page(self.torsion_group)
+        self.input_tabs.addTab(self.torsion_page, "Torsión")
+        main_layout.addWidget(self.input_tabs)
+
+        # La pestaña avisa si la torsión está activa aunque no esté visible
+        self.torsion_group.toggled.connect(self._update_torsion_tab_label)
+        self._update_torsion_tab_label()
+
         self._connect_signals()
+
+    def _update_torsion_tab_label(self):
+        index = self.input_tabs.indexOf(self.torsion_page)
+        if index >= 0:
+            self.input_tabs.setTabText(
+                index, "Torsión ✓" if self.torsion_group.isChecked() else "Torsión"
+            )
 
     def _connect_signals(self):
         for sb in [self.vu_spinbox, self.tu_spinbox, self.b_spinbox, self.h_spinbox,
@@ -280,14 +294,16 @@ class BeamShearInputPanel(QWidget):
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
         self.unit_system = unit_system
-        # El modo (con/sin torsión) sobrevive al cambio de unidades
+        # El modo (con/sin torsión) y la pestaña activa sobreviven al cambio
         torsion_on = self.torsion_group.isChecked()
         torsion_type = self.torsion_type_combo.currentData()
+        tab_index = self.input_tabs.currentIndex()
         old_layout = self.layout()
         if old_layout is not None:
             _clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
+        self.input_tabs.setCurrentIndex(tab_index)
         self.torsion_group.setChecked(torsion_on)
         idx = self.torsion_type_combo.findData(torsion_type)
         if idx >= 0:
@@ -374,7 +390,6 @@ class SlabShearInputPanel(QWidget):
         )
         _add_field(load_layout, 0, "Vu (por franja 1 m)", cv.force_unit, self.vu_spinbox)
         load_group.setLayout(load_layout)
-        main_layout.addWidget(load_group)
 
         # Geometría (b fija = 1 m, sólo se muestra)
         geom_group = QGroupBox("Geometría")
@@ -403,7 +418,6 @@ class SlabShearInputPanel(QWidget):
         )
         _add_field(geom_layout, 2, "Recubrimiento", cv.length_unit, self.cover_spinbox)
         geom_group.setLayout(geom_layout)
-        main_layout.addWidget(geom_group)
 
         # Materiales
         mat_group = QGroupBox("Materiales")
@@ -416,7 +430,6 @@ class SlabShearInputPanel(QWidget):
         )
         _add_field(mat_layout, 0, "f'c", cv.stress_unit, self.fc_spinbox)
         mat_group.setLayout(mat_layout)
-        main_layout.addWidget(mat_group)
 
         # Refuerzo longitudinal de flexión (sólo afecta el cálculo de d)
         ref_group = QGroupBox("Refuerzo longitudinal")
@@ -440,9 +453,13 @@ class SlabShearInputPanel(QWidget):
         note.setWordWrap(True)
         ref_layout.addWidget(note, 1, 0, 1, 3)
         ref_group.setLayout(ref_layout)
-        main_layout.addWidget(ref_group)
 
-        main_layout.addStretch()
+        # Los grupos se reparten en pestañas para no apilarlos en una columna
+        self.input_tabs = make_panel_tabs()
+        self.input_tabs.addTab(tab_page(load_group, geom_group, mat_group), "Sección")
+        self.input_tabs.addTab(tab_page(ref_group), "Refuerzo")
+        main_layout.addWidget(self.input_tabs)
+
         self._connect_signals()
 
     def _connect_signals(self):

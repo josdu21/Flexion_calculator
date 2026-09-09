@@ -8,6 +8,7 @@ from PyQt6.QtGui import QFont
 from core.units import UnitSystem, get_converter
 from core.bar_tables import REBAR_SIZES, get_rebar_by_number
 from core.flexion import ReinforcementConfig, RebarLayer
+from ui.form_helpers import make_panel_tabs, tab_page
 
 
 MAX_LAYERS = 4
@@ -53,7 +54,6 @@ class InputPanel(QWidget):
         )
         self._add_field(load_layout, 0, "Mu", converter.moment_unit, self.mu_spinbox)
         load_group.setLayout(load_layout)
-        main_layout.addWidget(load_group)
 
         # Geometría
         geom_group = QGroupBox("Geometría")
@@ -99,7 +99,6 @@ class InputPanel(QWidget):
         )
         self._add_field(geom_layout, row, "Recubrimiento", converter.length_unit, self.cover_spinbox)
         geom_group.setLayout(geom_layout)
-        main_layout.addWidget(geom_group)
 
         # Materiales
         mat_group = QGroupBox("Materiales")
@@ -119,7 +118,6 @@ class InputPanel(QWidget):
         )
         self._add_field(mat_layout, 1, "fy", converter.stress_unit, self.fy_spinbox)
         mat_group.setLayout(mat_layout)
-        main_layout.addWidget(mat_group)
 
         # ----- Refuerzo -----
         rebar_group = QGroupBox("Refuerzo")
@@ -194,9 +192,14 @@ class InputPanel(QWidget):
             self._on_layers_changed(1)
 
         rebar_group.setLayout(rebar_layout)
-        main_layout.addWidget(rebar_group)
 
-        main_layout.addStretch()
+        # Los grupos se reparten en pestañas para no apilarlos en una columna
+        self.input_tabs = make_panel_tabs()
+        self.input_tabs.addTab(
+            tab_page(load_group, geom_group, mat_group), "Sección"
+        )
+        self.input_tabs.addTab(tab_page(rebar_group), "Refuerzo")
+        main_layout.addWidget(self.input_tabs)
 
         # Conectar señales DESPUÉS de crear widgets
         self._connect_signals()
@@ -247,11 +250,13 @@ class InputPanel(QWidget):
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
         self.unit_system = unit_system
+        tab_index = self.input_tabs.currentIndex()
         old_layout = self.layout()
         if old_layout is not None:
             self._clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
+        self.input_tabs.setCurrentIndex(tab_index)
         self._building = False
         self.values_changed.emit()
 

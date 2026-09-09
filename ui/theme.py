@@ -217,6 +217,38 @@ QTabBar::tab:hover:!selected {{
     color: {p.text_primary};
 }}
 
+/* Tercer nivel: pestañas dentro de un panel. Se dibujan como subrayado para
+   que se lean como subdivisión y no como otra jerarquía de navegación. */
+#panelTabs::pane {{
+    border: none;
+    border-top: 1px solid {p.border};
+    background: transparent;
+    top: -1px;
+}}
+
+#panelTabs QTabBar::tab {{
+    background: transparent;
+    color: {p.text_muted};
+    padding: 6px 14px;
+    font-size: 9pt;
+    font-weight: 600;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    margin-right: 4px;
+}}
+
+#panelTabs QTabBar::tab:selected {{
+    background: transparent;
+    color: {p.accent};
+    border-bottom: 2px solid {p.accent};
+}}
+
+#panelTabs QTabBar::tab:hover:!selected {{
+    background: transparent;
+    color: {p.text_primary};
+}}
+
 QGroupBox {{
     background-color: {p.bg_surface};
     border: 1px solid {p.border};
