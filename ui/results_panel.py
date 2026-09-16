@@ -1,16 +1,14 @@
 """Panel de resultados con diagrama de esfuerzos integrado."""
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
-    QTableWidget, QTableWidgetItem, QLabel, QHeaderView, QFrame,
-    QScrollArea, QSizePolicy
+    QWidget, QVBoxLayout, QGridLayout, QGroupBox, QLabel, QFrame, QScrollArea
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QColor
 
 from core.flexion import FlexionDesignResult
 from core.units import get_converter, UnitSystem
 from ui.stress_diagram import StressDiagramWidget
-from ui.theme import PALETTE
+from ui.theme import PALETTE, alpha
+from ui.form_helpers import DetailsSection, ResponsiveColumns
 
 
 class ResultsPanel(QWidget):
@@ -38,9 +36,8 @@ class ResultsPanel(QWidget):
         main_layout.setSpacing(10)
 
         # Título
-        title = QLabel("📊 Resultados del diseño")
+        title = QLabel("Resultado del diseño")
         title.setObjectName("panelTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
 
         # Diagrama de esfuerzos
@@ -50,7 +47,6 @@ class ResultsPanel(QWidget):
         self.diagram.setMinimumHeight(260)
         diagram_layout.addWidget(self.diagram)
         diagram_group.setLayout(diagram_layout)
-        main_layout.addWidget(diagram_group)
 
         # Banner de estado
         self.status_label = QLabel("Estado: —")
@@ -59,12 +55,7 @@ class ResultsPanel(QWidget):
         self.status_label.setMinimumHeight(40)
         main_layout.addWidget(self.status_label)
 
-        # Grid principal con 2 columnas
-        info_layout = QHBoxLayout()
-        info_layout.setSpacing(8)
-
-        # --- Columna 1 ---
-        col1 = QVBoxLayout()
+        # Resumen adaptable: dos tarjetas que se apilan en ventanas estrechas.
 
         # Acero
         steel_group = QGroupBox("Acero")
@@ -85,7 +76,6 @@ class ResultsPanel(QWidget):
         steel_layout.addWidget(QLabel("As máximo:"), 3, 0)
         steel_layout.addWidget(self.as_max_label, 3, 1)
         steel_group.setLayout(steel_layout)
-        col1.addWidget(steel_group)
 
         # Capacidad
         cap_group = QGroupBox("Capacidad vs Demanda")
@@ -102,7 +92,6 @@ class ResultsPanel(QWidget):
         cap_layout.addWidget(QLabel("φMn / Mu:"), 2, 0)
         cap_layout.addWidget(self.ratio_label, 2, 1)
         cap_group.setLayout(cap_layout)
-        col1.addWidget(cap_group)
 
         # Geometría
         geom_group = QGroupBox("Geometría calculada")
@@ -125,12 +114,7 @@ class ResultsPanel(QWidget):
         geom_layout.addWidget(QLabel("β₁:"), 4, 0)
         geom_layout.addWidget(self.beta1_label, 4, 1)
         geom_group.setLayout(geom_layout)
-        col1.addWidget(geom_group)
 
-        info_layout.addLayout(col1, 1)
-
-        # --- Columna 2 ---
-        col2 = QVBoxLayout()
 
         # Separación de barras (NUEVO)
         spacing_group = QGroupBox("Separación entre barras (ACI 318-19)")
@@ -159,7 +143,6 @@ class ResultsPanel(QWidget):
         spacing_layout.addWidget(self.s_v_min_label, 3, 1)
 
         spacing_group.setLayout(spacing_layout)
-        col2.addWidget(spacing_group)
 
         # Fuerzas internas
         forces_group = QGroupBox("Fuerzas internas")
@@ -188,17 +171,21 @@ class ResultsPanel(QWidget):
         forces_layout.addWidget(QLabel("ρ proporcionada:"), 2, 0)
         forces_layout.addWidget(self.rho_label, 2, 1)
         forces_group.setLayout(forces_layout)
-        col2.addWidget(forces_group)
 
-        info_layout.addLayout(col2, 1)
-        main_layout.addLayout(info_layout)
+        main_layout.addWidget(ResponsiveColumns(steel_group, cap_group))
+        main_layout.addWidget(diagram_group)
+        self.details = DetailsSection(
+            "Comprobaciones y valores intermedios", spacing_group, geom_group, forces_group
+        )
+        main_layout.addWidget(self.details)
 
         # Lista de advertencias
         self.warnings_label = QLabel("")
         self.warnings_label.setObjectName("warningLabel")
         self.warnings_label.setWordWrap(True)
         self.warnings_label.setVisible(False)
-        main_layout.addWidget(self.warnings_label)
+        main_layout.insertWidget(2, self.warnings_label)
+        main_layout.addStretch()
 
     def _make_value_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -290,7 +277,7 @@ class ResultsPanel(QWidget):
 
         # Advertencias
         if result.warnings:
-            warn_text = "\n".join(f"⚠ {w}" for w in result.warnings)
+            warn_text = "\n".join(result.warnings)
             self.warnings_label.setText(warn_text)
             self.warnings_label.setVisible(True)
         else:
@@ -319,16 +306,17 @@ class ResultsPanel(QWidget):
 
     def _update_status_banner(self, status: str):
         color_map = {
-            "OK": (PALETTE.ok, "✓ DISEÑO CORRECTO"),
-            "ARMADO INSUFICIENTE": (PALETTE.error, "✗ ARMADO INSUFICIENTE"),
-            "AUMENTAR SECCIÓN": (PALETTE.error, "✗ AUMENTAR SECCIÓN"),
-            "REDUCIR SECCIÓN": (PALETTE.warning, "⚠ REDUCIR SECCIÓN"),
-            "ERROR": (PALETTE.error, "✗ DATOS INVÁLIDOS"),
+            "OK": (PALETTE.ok, "Diseño correcto"),
+            "ARMADO INSUFICIENTE": (PALETTE.error, "Armado insuficiente"),
+            "AUMENTAR SECCIÓN": (PALETTE.error, "Aumentar sección"),
+            "REDUCIR SECCIÓN": (PALETTE.warning, "Reducir sección"),
+            "ERROR": (PALETTE.error, "Datos inválidos"),
         }
         color, text = color_map.get(status, (PALETTE.text_muted, status))
         self.status_label.setText(text)
         self.status_label.setStyleSheet(
-            f"background-color: {color}; color: {PALETTE.bg_base}; "
+            f"background-color: {alpha(color, 0.12)}; color: {color}; "
+            f"border: 1px solid {alpha(color, 0.35)}; "
             f"font-size: 13pt; font-weight: bold; "
             f"border-radius: 6px; padding: 6px;"
         )

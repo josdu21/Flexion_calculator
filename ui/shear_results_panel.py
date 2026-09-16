@@ -1,7 +1,7 @@
 """Panel de resultados para diseño/revisión por cortante y torsión."""
 from typing import Optional, Union
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QWidget, QVBoxLayout, QGridLayout, QGroupBox,
     QLabel, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import Qt
@@ -9,8 +9,8 @@ from PyQt6.QtCore import Qt
 from core.shear import BeamShearResult, SlabShearResult
 from core.torsion import BeamShearTorsionResult
 from core.units import get_converter, UnitSystem
-from ui.form_helpers import make_panel_tabs, tab_page
-from ui.theme import PALETTE
+from ui.form_helpers import DetailsSection
+from ui.theme import PALETTE, alpha
 
 
 ShearResultT = Union[BeamShearResult, SlabShearResult]
@@ -55,13 +55,8 @@ class ShearResultsPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        title_text = (
-            "📊 Cortante en losa" if self.is_slab
-            else "📊 Cortante y torsión en viga"
-        )
-        title = QLabel(title_text)
+        title = QLabel("Resultado del diseño")
         title.setObjectName("panelTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
 
         # Banner de estado
@@ -123,8 +118,6 @@ class ShearResultsPanel(QWidget):
             stir_layout.addWidget(self.s_min_req_label, 4, 1)
             stir_layout.addWidget(QLabel("s máx. (ACI 9.7.6.2.2):"), 5, 0)
             stir_layout.addWidget(self.s_max_label, 5, 1)
-            stir_layout.addWidget(QLabel("s ADOPTADO:"), 6, 0)
-            stir_layout.addWidget(self.s_adopted_label, 6, 1)
             stir_group.setLayout(stir_layout)
 
         # --- Geometría ---
@@ -139,45 +132,39 @@ class ShearResultsPanel(QWidget):
         geom_layout.addWidget(self.b_label, 1, 1)
         geom_group.setLayout(geom_layout)
 
+        main_layout.addWidget(cap_group)
         if self.is_slab:
-            # La losa tiene pocos grupos: no hace falta repartirlos
-            main_layout.addWidget(cap_group)
-            main_layout.addWidget(geom_group)
+            self.details = DetailsSection("Geometría calculada", geom_group)
         else:
-            # Cortante y torsión se separan para no exigir scroll
-            self.result_tabs = make_panel_tabs()
-            self.result_tabs.addTab(
-                tab_page(cap_group, stir_group, geom_group), "Cortante"
-            )
-            self.result_tabs.addTab(
-                tab_page(*self._build_torsion_groups()), "Torsión"
-            )
-            main_layout.addWidget(self.result_tabs)
+            # La separación adoptada permanece visible; los límites se consultan
+            # en el desglose sin repetir el resultado en dos lugares.
+            summary = QGroupBox("Separación de estribos")
+            summary_layout = QGridLayout(summary)
+            summary_layout.addWidget(QLabel("s adoptado"), 0, 0)
+            summary_layout.addWidget(self.s_adopted_label, 0, 1)
+            main_layout.addWidget(summary)
+            self.details = DetailsSection("Comprobaciones de cortante", stir_group, geom_group)
+            torsion_groups = self._build_torsion_groups()
+            # No se reserva una página vacía para torsión inactiva.
+            self.torsion_details = DetailsSection("Comprobaciones de torsión", *torsion_groups[:-1])
+            main_layout.addWidget(self.torsion_long_group)
+            main_layout.addWidget(self.torsion_details)
+        main_layout.addWidget(self.details)
 
         # --- Advertencias ---
         self.warnings_label = QLabel("")
         self.warnings_label.setObjectName("warningLabel")
         self.warnings_label.setWordWrap(True)
         self.warnings_label.setVisible(False)
-        main_layout.addWidget(self.warnings_label)
+        main_layout.insertWidget(2, self.warnings_label)
 
         main_layout.addStretch()
 
     def _build_torsion_groups(self):
         """Grupos de torsión (sólo viga). Ocultos mientras no haya torsión.
 
-        Devuelve los widgets en el orden en que van dentro de la pestaña.
+        Devuelve las comprobaciones y el refuerzo longitudinal.
         """
-        # Aviso mientras la torsión no forme parte del diseño
-        self.torsion_placeholder = QLabel(
-            "La torsión no está incluida en este diseño.\n\n"
-            "Actívala en la pestaña «Torsión» del panel de entradas para "
-            "revisar cortante y torsión en conjunto."
-        )
-        self.torsion_placeholder.setObjectName("infoLabel")
-        self.torsion_placeholder.setWordWrap(True)
-        self.torsion_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         # --- Demanda vs capacidad a torsión ---
         tor_group = QGroupBox("Torsión — Demanda vs Capacidad")
         tor_layout = QGridLayout()
@@ -266,7 +253,7 @@ class ShearResultsPanel(QWidget):
                       self.torsion_long_group):
             group.setVisible(False)
 
-        return (self.torsion_placeholder, self.torsion_demand_group,
+        return (self.torsion_demand_group,
                 self.torsion_combined_group, self.torsion_long_group)
 
     def _make_value_label(self, text: str) -> QLabel:
@@ -336,7 +323,7 @@ class ShearResultsPanel(QWidget):
 
         # Advertencias
         if result.warnings:
-            warn_text = "\n".join(f"⚠ {w}" for w in result.warnings)
+            warn_text = "\n".join(result.warnings)
             self.warnings_label.setText(warn_text)
             self.warnings_label.setVisible(True)
         else:
@@ -351,7 +338,7 @@ class ShearResultsPanel(QWidget):
         )
         negligible = active and result.torsion_regime == "DESPRECIABLE"
 
-        self.torsion_placeholder.setVisible(not active)
+        self.torsion_details.setVisible(active)
         self.torsion_demand_group.setVisible(active)
         self.torsion_combined_group.setVisible(active and not negligible)
         self.torsion_long_group.setVisible(active and not negligible)
@@ -432,15 +419,16 @@ class ShearResultsPanel(QWidget):
 
     def _update_status_banner(self, status: str, result: ShearResultT):
         color_map = {
-            "OK": (PALETTE.ok, "✓ DISEÑO CORRECTO"),
-            "NO REQUIERE ESTRIBOS": (PALETTE.ok, "✓ NO REQUIERE ESTRIBOS"),
-            "AUMENTAR SECCIÓN": (PALETTE.error, "✗ AUMENTAR SECCIÓN"),
-            "ERROR": (PALETTE.error, "✗ DATOS INVÁLIDOS"),
+            "OK": (PALETTE.ok, "Diseño correcto"),
+            "NO REQUIERE ESTRIBOS": (PALETTE.ok, "No requiere estribos"),
+            "AUMENTAR SECCIÓN": (PALETTE.error, "Aumentar sección"),
+            "ERROR": (PALETTE.error, "Datos inválidos"),
         }
         color, text = color_map.get(status, (PALETTE.text_muted, status))
         self.status_label.setText(text)
         self.status_label.setStyleSheet(
-            f"background-color: {color}; color: {PALETTE.bg_base}; "
+            f"background-color: {alpha(color, 0.12)}; color: {color}; "
+            f"border: 1px solid {alpha(color, 0.35)}; "
             f"font-size: 13pt; font-weight: bold; "
             f"border-radius: 6px; padding: 6px;"
         )
@@ -463,7 +451,7 @@ class ShearResultsPanel(QWidget):
             for group in (self.torsion_demand_group, self.torsion_combined_group,
                           self.torsion_long_group):
                 group.setVisible(False)
-            self.torsion_placeholder.setVisible(True)
+            self.torsion_details.setVisible(False)
         for lbl in labels:
             lbl.setText("—")
         self.status_label.setText("Estado: —")
