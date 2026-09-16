@@ -1,14 +1,13 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
-    QGridLayout, QGroupBox, QFrame, QSpinBox, QComboBox
+    QWidget, QVBoxLayout, QLabel, QDoubleSpinBox,
+    QGridLayout, QGroupBox, QSpinBox, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
 
 from core.units import UnitSystem, get_converter
-from core.bar_tables import REBAR_SIZES, get_rebar_by_number
+from core.bar_tables import get_rebar_by_number
 from core.flexion import ReinforcementConfig, RebarLayer
-from ui.form_helpers import make_panel_tabs, tab_page
+from ui.form_helpers import scroll_form
 
 
 MAX_LAYERS = 4
@@ -36,12 +35,13 @@ class InputPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        # Título
-        title_text = "Losa (franja unitaria 1 m)" if self.is_slab else "Viga rectangular"
-        title = QLabel(f"📐 {title_text}")
+        title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
+        hint = QLabel("Geometría y concreto compartidos con cortante.")
+        hint.setObjectName("infoLabel")
+        hint.setWordWrap(True)
+        main_layout.addWidget(hint)
 
         # Solicitación
         load_group = QGroupBox("Solicitación")
@@ -87,14 +87,16 @@ class InputPanel(QWidget):
             row += 1
 
         self.h_spinbox = self._make_spinbox(
-            value=converter.default_h, rng=converter.range_h,
+            value=(6.0 if self.unit_system == UnitSystem.ENGLISH else 15.0)
+            if self.is_slab else converter.default_h, rng=converter.range_h,
             decimals=converter.decimals_length, step=length_step,
         )
         self._add_field(geom_layout, row, "Altura h", converter.length_unit, self.h_spinbox)
         row += 1
 
         self.cover_spinbox = self._make_spinbox(
-            value=converter.default_cover, rng=converter.range_cover,
+            value=(0.75 if self.unit_system == UnitSystem.ENGLISH else 2.0)
+            if self.is_slab else converter.default_cover, rng=converter.range_cover,
             decimals=converter.decimals_length, step=cover_step,
         )
         self._add_field(geom_layout, row, "Recubrimiento", converter.length_unit, self.cover_spinbox)
@@ -193,13 +195,8 @@ class InputPanel(QWidget):
 
         rebar_group.setLayout(rebar_layout)
 
-        # Los grupos se reparten en pestañas para no apilarlos en una columna
-        self.input_tabs = make_panel_tabs()
-        self.input_tabs.addTab(
-            tab_page(load_group, geom_group, mat_group), "Sección"
-        )
-        self.input_tabs.addTab(tab_page(rebar_group), "Refuerzo")
-        main_layout.addWidget(self.input_tabs)
+        self.form_scroll = scroll_form(load_group, geom_group, mat_group, rebar_group)
+        main_layout.addWidget(self.form_scroll)
 
         # Conectar señales DESPUÉS de crear widgets
         self._connect_signals()
@@ -212,13 +209,16 @@ class InputPanel(QWidget):
         sb.setRange(rng[0], rng[1])
         sb.setSingleStep(step)
         sb.setValue(value)
-        sb.setMinimumWidth(110)
+        sb.setKeyboardTracking(False)
+        sb.setMinimumWidth(100)
         sb.setAlignment(Qt.AlignmentFlag.AlignRight)
         return sb
 
     def _add_field(self, layout, row, label, unit, widget):
         lbl = QLabel(label)
         lbl.setObjectName("fieldLabel")
+        lbl.setBuddy(widget)
+        widget.setAccessibleName(f"{label} ({unit})")
         unit_lbl = QLabel(f"[{unit}]")
         unit_lbl.setObjectName("unitLabel")
         layout.addWidget(lbl, row, 0)
@@ -250,13 +250,11 @@ class InputPanel(QWidget):
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
         self.unit_system = unit_system
-        tab_index = self.input_tabs.currentIndex()
         old_layout = self.layout()
         if old_layout is not None:
             self._clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
-        self.input_tabs.setCurrentIndex(tab_index)
         self._building = False
         self.values_changed.emit()
 

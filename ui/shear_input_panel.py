@@ -1,13 +1,13 @@
 """Paneles de entrada para diseño por cortante y torsión (viga y losa)."""
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QDoubleSpinBox,
-    QGridLayout, QGroupBox, QSpinBox, QComboBox,
+    QGridLayout, QGroupBox, QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
-from ui.form_helpers import make_panel_tabs, tab_page
+from ui.form_helpers import scroll_form
 
 
 STIRRUP_BAR_NUMBERS = [2, 3, 4, 5]
@@ -55,7 +55,8 @@ def _make_spinbox(value, rng, decimals, step):
     sb.setRange(rng[0], rng[1])
     sb.setSingleStep(step)
     sb.setValue(value)
-    sb.setMinimumWidth(110)
+    sb.setKeyboardTracking(False)
+    sb.setMinimumWidth(100)
     sb.setAlignment(Qt.AlignmentFlag.AlignRight)
     return sb
 
@@ -63,6 +64,8 @@ def _make_spinbox(value, rng, decimals, step):
 def _add_field(layout, row, label, unit, widget):
     lbl = QLabel(label)
     lbl.setObjectName("fieldLabel")
+    lbl.setBuddy(widget)
+    widget.setAccessibleName(f"{label} ({unit})")
     unit_lbl = QLabel(f"[{unit}]")
     unit_lbl.setObjectName("unitLabel")
     layout.addWidget(lbl, row, 0)
@@ -109,10 +112,13 @@ class BeamShearInputPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        title = QLabel("✂  Viga — Cortante y torsión")
+        title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
+        hint = QLabel("Geometría y concreto compartidos con flexión.")
+        hint.setObjectName("infoLabel")
+        hint.setWordWrap(True)
+        main_layout.addWidget(hint)
 
         length_step = 0.5 if self.unit_system == UnitSystem.ENGLISH else 1.0
         cover_step = 0.25 if self.unit_system == UnitSystem.ENGLISH else 0.5
@@ -131,7 +137,9 @@ class BeamShearInputPanel(QWidget):
         load_group.setLayout(load_layout)
 
         # Torsión (grupo activable)
-        self.torsion_group = QGroupBox("Torsión  (ACI 318-19 §22.7)")
+        self.torsion_group = QGroupBox("Incluir torsión · Tu")
+        self.torsion_group.setAccessibleName("Incluir torsión en el diseño de viga")
+        self.torsion_group.setToolTip("Activa el diseño combinado de cortante y torsión (ACI 318-19 §22.7)")
         self.torsion_group.setCheckable(True)
         self.torsion_group.setChecked(False)
         self.torsion_group.toggled.connect(self._emit_if_ready)
@@ -149,8 +157,8 @@ class BeamShearInputPanel(QWidget):
 
         tor_layout.addWidget(QLabel("Tipo de torsión:"), 1, 0)
         self.torsion_type_combo = QComboBox()
-        self.torsion_type_combo.addItem("Equilibrio (no redistribuible)", "EQUILIBRIO")
-        self.torsion_type_combo.addItem("Compatibilidad (redistribuible)", "COMPATIBILIDAD")
+        self.torsion_type_combo.addItem("Equilibrio", "EQUILIBRIO")
+        self.torsion_type_combo.addItem("Compatibilidad", "COMPATIBILIDAD")
         self.torsion_type_combo.currentIndexChanged.connect(self._emit_if_ready)
         tor_layout.addWidget(self.torsion_type_combo, 1, 1, 1, 2)
 
@@ -169,7 +177,6 @@ class BeamShearInputPanel(QWidget):
         tor_note.setWordWrap(True)
         tor_layout.addWidget(tor_note, 3, 0, 1, 3)
 
-        self.torsion_group.setLayout(tor_layout)
 
         # Geometría
         geom_group = QGroupBox("Geometría")
@@ -238,7 +245,7 @@ class BeamShearInputPanel(QWidget):
         stirrup_layout.addWidget(self.legs_combo, 1, 1, 1, 2)
 
         # Barra longitudinal de flexión (sólo afecta el cálculo de d)
-        stirrup_layout.addWidget(QLabel("Barra longitudinal (flexión):"), 2, 0)
+        stirrup_layout.addWidget(QLabel("Barra long. para d:"), 2, 0)
         self.db_long_combo = QComboBox()
         for n in LONG_BAR_NUMBERS:
             r = get_rebar_by_number(n)
@@ -258,26 +265,24 @@ class BeamShearInputPanel(QWidget):
 
         stirrup_group.setLayout(stirrup_layout)
 
-        # Los grupos se reparten en pestañas para no apilarlos en una columna
-        self.input_tabs = make_panel_tabs()
-        self.input_tabs.addTab(tab_page(load_group, geom_group, mat_group), "Sección")
-        self.input_tabs.addTab(tab_page(stirrup_group), "Refuerzo")
-        self.torsion_page = tab_page(self.torsion_group)
-        self.input_tabs.addTab(self.torsion_page, "Torsión")
-        main_layout.addWidget(self.input_tabs)
-
-        # La pestaña avisa si la torsión está activa aunque no esté visible
-        self.torsion_group.toggled.connect(self._update_torsion_tab_label)
-        self._update_torsion_tab_label()
-
+        # Torsión muestra sus opciones solamente cuando está activada.
+        self.torsion_options = QWidget()
+        self.torsion_options.setObjectName("torsionOptions")
+        self.torsion_options.setLayout(tor_layout)
+        wrapper = QVBoxLayout(self.torsion_group)
+        self.torsion_hint = QLabel("Activa esta casilla para ingresar Tu y calcular el refuerzo por torsión.")
+        self.torsion_hint.setObjectName("infoLabel")
+        self.torsion_hint.setWordWrap(True)
+        wrapper.addWidget(self.torsion_hint)
+        wrapper.addWidget(self.torsion_options)
+        self.torsion_options.setVisible(False)
+        self.torsion_group.toggled.connect(self.torsion_options.setVisible)
+        self.torsion_group.toggled.connect(lambda active: self.torsion_hint.setVisible(not active))
+        self.form_scroll = scroll_form(
+            load_group, self.torsion_group, geom_group, mat_group, stirrup_group
+        )
+        main_layout.addWidget(self.form_scroll)
         self._connect_signals()
-
-    def _update_torsion_tab_label(self):
-        index = self.input_tabs.indexOf(self.torsion_page)
-        if index >= 0:
-            self.input_tabs.setTabText(
-                index, "Torsión ✓" if self.torsion_group.isChecked() else "Torsión"
-            )
 
     def _connect_signals(self):
         for sb in [self.vu_spinbox, self.tu_spinbox, self.b_spinbox, self.h_spinbox,
@@ -294,16 +299,14 @@ class BeamShearInputPanel(QWidget):
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
         self.unit_system = unit_system
-        # El modo (con/sin torsión) y la pestaña activa sobreviven al cambio
+        # El modo y tipo de torsión sobreviven al cambio de unidades.
         torsion_on = self.torsion_group.isChecked()
         torsion_type = self.torsion_type_combo.currentData()
-        tab_index = self.input_tabs.currentIndex()
         old_layout = self.layout()
         if old_layout is not None:
             _clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
-        self.input_tabs.setCurrentIndex(tab_index)
         self.torsion_group.setChecked(torsion_on)
         idx = self.torsion_type_combo.findData(torsion_type)
         if idx >= 0:
@@ -370,10 +373,13 @@ class SlabShearInputPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        title = QLabel("✂  Losa — Cortante (sin refuerzo)")
+        title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
+        hint = QLabel("Geometría y concreto compartidos con flexión.")
+        hint.setObjectName("infoLabel")
+        hint.setWordWrap(True)
+        main_layout.addWidget(hint)
 
         length_step = 0.5 if self.unit_system == UnitSystem.ENGLISH else 1.0
         cover_step = 0.25 if self.unit_system == UnitSystem.ENGLISH else 0.5
@@ -435,7 +441,7 @@ class SlabShearInputPanel(QWidget):
         ref_group = QGroupBox("Refuerzo longitudinal")
         ref_layout = QGridLayout()
         ref_layout.setVerticalSpacing(6)
-        ref_layout.addWidget(QLabel("Barra longitudinal (flexión):"), 0, 0)
+        ref_layout.addWidget(QLabel("Barra long. para d:"), 0, 0)
         self.db_long_combo = QComboBox()
         for n in LONG_BAR_NUMBERS:
             r = get_rebar_by_number(n)
@@ -454,11 +460,8 @@ class SlabShearInputPanel(QWidget):
         ref_layout.addWidget(note, 1, 0, 1, 3)
         ref_group.setLayout(ref_layout)
 
-        # Los grupos se reparten en pestañas para no apilarlos en una columna
-        self.input_tabs = make_panel_tabs()
-        self.input_tabs.addTab(tab_page(load_group, geom_group, mat_group), "Sección")
-        self.input_tabs.addTab(tab_page(ref_group), "Refuerzo")
-        main_layout.addWidget(self.input_tabs)
+        self.form_scroll = scroll_form(load_group, geom_group, mat_group, ref_group)
+        main_layout.addWidget(self.form_scroll)
 
         self._connect_signals()
 
