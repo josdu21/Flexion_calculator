@@ -34,6 +34,26 @@ chmod +x ejecutar.sh
 ./ejecutar.sh
 ```
 
+## Interfaz de diseño
+
+- Una fila de navegación: flexión y cortante/torsión de viga; flexión y cortante de losa.
+- Formularios continuos con desplazamiento. Los resultados se actualizan al confirmar
+  una entrada (Enter o salir del campo), sin botón de recálculo.
+- Ancho, altura, recubrimiento y f'c se sincronizan entre los dos análisis del mismo
+  elemento. Las cargas y las hipótesis de refuerzo de cada análisis son independientes.
+  La losa comienza con una franja de 1 m, espesor de 15 cm y recubrimiento de 2 cm.
+- Estado, advertencias y refuerzo de diseño aparecen primero. Las comprobaciones
+  intermedias se despliegan bajo demanda; la casilla **Incluir torsión · Tu** está
+  debajo de Vu en **Viga · Cortante / torsión**, visible sin desplazarse.
+- **Exportar memoria** (`Ctrl+E`) guarda el análisis activo. Cancelar cierra el diálogo.
+- El resumen se apila automáticamente al reducir la ventana (mínimo 960 × 640).
+
+Pruebas de los flujos de interfaz (requieren PyQt6):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## 📥 Instalación
 
 ### Linux (Arch/CachyOS)
