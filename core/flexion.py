@@ -1,47 +1,25 @@
 """Motor de diseño por flexión según ACI 318-19.
 
 Todos los inputs internos están en SI: N, mm, MPa.
+
+La geometría del armado (lechos, centroide, separaciones) vive en
+:mod:`core.section_geometry` porque no depende de la norma; acá queda sólo lo
+propio de ACI 318-19. ``RebarLayer`` y ``ReinforcementConfig`` se re-exportan
+para no romper a quien las importe desde este módulo.
 """
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-
-# Constantes ACI 318-19
-MIN_BAR_SPACING_MM = 25.0   # §25.2.1 - separación libre mínima
-
-
-@dataclass
-class RebarLayer:
-    """Un lecho de barras."""
-    n_bars: int
-    bar_diameter_mm: float
-    bar_area_mm2: float
-
-    @property
-    def area_mm2(self) -> float:
-        return self.n_bars * self.bar_area_mm2
-
-
-@dataclass
-class ReinforcementConfig:
-    """Configuración del refuerzo: lechos, estribo, etc."""
-    layers: List[RebarLayer]
-    stirrup_diameter_mm: float = 9.52  # default #3
-    # Separación vertical entre lechos (libre, mm). Si <0, se usa el mínimo ACI
-    vertical_clear_spacing_mm: float = -1.0
-
-    @property
-    def total_bars(self) -> int:
-        return sum(L.n_bars for L in self.layers)
-
-    @property
-    def total_area_mm2(self) -> float:
-        return sum(L.area_mm2 for L in self.layers)
-
-    @property
-    def total_area_cm2(self) -> float:
-        return self.total_area_mm2 / 100.0
+from core.section_geometry import (  # noqa: F401  (re-exportadas a propósito)
+    MIN_BAR_SPACING_MM,
+    RebarLayer,
+    ReinforcementConfig,
+    default_reinforcement,
+    effective_depth,
+    horizontal_clear_spacing,
+    min_vertical_clear_spacing_mm,
+)
 
 
 @dataclass
@@ -123,13 +101,7 @@ class BeamSection:
 
         if reinforcement is None:
             # Configuración por defecto: 1 lecho, 2 barras del db_assumed
-            self.reinforcement = ReinforcementConfig(
-                layers=[RebarLayer(
-                    n_bars=2,
-                    bar_diameter_mm=db_assumed_mm,
-                    bar_area_mm2=math.pi * (db_assumed_mm / 2.0) ** 2,
-                )]
-            )
+            self.reinforcement = default_reinforcement(db_assumed_mm)
         else:
             self.reinforcement = reinforcement
 
@@ -141,76 +113,14 @@ class BeamSection:
         return max(beta_1, 0.65)
 
     def _calculate_d_effective(self) -> tuple:
-        """Calcula d efectivo basado en la configuración real de lechos.
-
-        Retorna (d_mm, vertical_clear_spacing_used_mm, y_layers).
-        y_layers: distancia desde la fibra inferior al centroide de cada lecho.
-        """
-        reinf = self.reinforcement
-        db_st = reinf.stirrup_diameter_mm
-
-        if not reinf.layers:
-            return self.h_mm * 0.9, 0.0, []
-
-        # Diámetro principal: el más grande entre todos los lechos
-        db_main = max(L.bar_diameter_mm for L in reinf.layers)
-
-        # Separación vertical libre entre lechos (ACI 318-19 §25.2.2: max(db, 25mm))
-        s_v_min = max(db_main, MIN_BAR_SPACING_MM)
-        s_v = reinf.vertical_clear_spacing_mm if reinf.vertical_clear_spacing_mm > 0 else s_v_min
-
-        # Distancia desde la fibra inferior al centroide de cada lecho
-        # Lecho 1 (más cercano a la fibra inferior):
-        # y_1 = cover_libre + db_estribo + db_main_layer1/2
-        # Lecho i (i > 1): y_i = y_(i-1) + db_main_layer(i-1)/2 + s_v + db_main_layer(i)/2
-        y_layers = []
-        for i, layer in enumerate(reinf.layers):
-            if i == 0:
-                y_i = self.cover_mm + db_st + layer.bar_diameter_mm / 2.0
-            else:
-                prev = reinf.layers[i - 1]
-                y_i = (y_layers[-1] + prev.bar_diameter_mm / 2.0
-                       + s_v + layer.bar_diameter_mm / 2.0)
-            y_layers.append(y_i)
-
-        # Centroide ponderado por área
-        total_area = sum(L.area_mm2 for L in reinf.layers)
-        if total_area <= 0:
-            return self.h_mm * 0.9, s_v, []
-
-        y_centroid = sum(L.area_mm2 * y for L, y in zip(reinf.layers, y_layers)) / total_area
-
-        d_mm = self.h_mm - y_centroid
-        return max(d_mm, 1e-6), s_v, y_layers
+        """d efectivo según la disposición real de lechos (ACI 318-19 §25.2.2)."""
+        return effective_depth(self.reinforcement, self.h_mm, self.cover_mm)
 
     def _calculate_horizontal_spacing(self) -> tuple:
-        """Calcula la separación libre horizontal real y la mínima requerida.
-
-        Si hay varios lechos, evalúa el lecho más cargado (mayor n_bars).
-        Retorna (s_actual_mm, s_min_mm).
-        """
-        reinf = self.reinforcement
-        if not reinf.layers:
-            return 0.0, MIN_BAR_SPACING_MM
-
-        # Lecho con más barras (el más crítico horizontalmente)
-        critical_layer = max(reinf.layers, key=lambda L: L.n_bars)
-        n = critical_layer.n_bars
-        db = critical_layer.bar_diameter_mm
-        db_st = reinf.stirrup_diameter_mm
-
-        s_min = max(db, MIN_BAR_SPACING_MM)
-
-        if n <= 1:
-            # Una sola barra: no hay separación que medir, OK por convención
-            return float('inf'), s_min
-
-        # Ancho disponible entre estribos = b - 2·cover - 2·db_st
-        w_avail = self.b_mm - 2 * self.cover_mm - 2 * db_st
-        # Espacio para las barras = n · db
-        # Separación libre entre barras = (w_avail - n·db) / (n-1)
-        s_actual = (w_avail - n * db) / (n - 1) if n > 1 else float('inf')
-        return s_actual, s_min
+        """Separación libre horizontal real y la mínima exigida (§25.2.1)."""
+        return horizontal_clear_spacing(
+            self.reinforcement, self.b_mm, self.cover_mm
+        )
 
     def _validate(self) -> Optional[str]:
         if self.b_mm <= 0 or self.h_mm <= 0:
@@ -313,11 +223,7 @@ class BeamSection:
 
         # Separación vertical (solo si hay > 1 lecho)
         n_layers = len(self.reinforcement.layers)
-        s_v_min = max(
-            (max(L.bar_diameter_mm for L in self.reinforcement.layers)
-             if self.reinforcement.layers else 0),
-            MIN_BAR_SPACING_MM
-        )
+        s_v_min = min_vertical_clear_spacing_mm(self.reinforcement)
         s_v_ok = (n_layers <= 1) or (s_v_used >= s_v_min)
         if n_layers > 1 and not s_v_ok:
             warnings_list.append(
