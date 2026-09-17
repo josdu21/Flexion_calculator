@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from core.design_code import DesignCode, code_of
 from core.shear import BeamShearResult, SlabShearResult
 from core.torsion import BeamShearTorsionResult
 from core.units import get_converter, UnitSystem
@@ -36,6 +37,8 @@ class ShearResultsPanel(QWidget):
         self.unit_system = unit_system
         self.is_slab = is_slab
         self.result: Optional[ShearResultT] = None
+        # Rótulos cuyo texto depende de la norma; los llena _caption().
+        self._code_captions = []
         self._init_ui()
 
     def _init_ui(self):
@@ -83,7 +86,10 @@ class ShearResultsPanel(QWidget):
         cap_layout.addWidget(QLabel("φVc:"), 2, 0)
         cap_layout.addWidget(self.phi_vc_label, 2, 1)
         if not self.is_slab:
-            cap_layout.addWidget(QLabel("φVn (φ(Vc + Vs)):"), 3, 0)
+            cap_layout.addWidget(self._caption((
+                "φVn (φ(Vc + Vs)):",
+                "φVn (φ·mín(Vc+Vs, 0.25f'c·b·dv)):",
+            )), 3, 0)
             cap_layout.addWidget(self.phi_vn_label, 3, 1)
             cap_layout.addWidget(QLabel("φVn / Vu:"), 4, 0)
             cap_layout.addWidget(self.ratio_label, 4, 1)
@@ -116,7 +122,10 @@ class ShearResultsPanel(QWidget):
             stir_layout.addWidget(self.s_req_label, 3, 1)
             stir_layout.addWidget(QLabel("s por mínimo (Av,min):"), 4, 0)
             stir_layout.addWidget(self.s_min_req_label, 4, 1)
-            stir_layout.addWidget(QLabel("s máx. (ACI 9.7.6.2.2):"), 5, 0)
+            self.s_max_caption = self._caption((
+                "s máx. (ACI 9.7.6.2.2):", "s máx. (§5.7.2.6):",
+            ))
+            stir_layout.addWidget(self.s_max_caption, 5, 0)
             stir_layout.addWidget(self.s_max_label, 5, 1)
             stir_group.setLayout(stir_layout)
 
@@ -126,15 +135,37 @@ class ShearResultsPanel(QWidget):
         geom_layout.setVerticalSpacing(5)
         self.d_label = self._make_value_label("—")
         self.b_label = self._make_value_label("—")
-        geom_layout.addWidget(QLabel("d efectivo:"), 0, 0)
+        self.d_caption = self._caption(("d efectivo:", "dv (cortante):"))
+        geom_layout.addWidget(self.d_caption, 0, 0)
         geom_layout.addWidget(self.d_label, 0, 1)
         geom_layout.addWidget(QLabel("b considerado:"), 1, 0)
         geom_layout.addWidget(self.b_label, 1, 1)
         geom_group.setLayout(geom_layout)
 
+        # --- Propio de AASHTO ---
+        # d_v, β, θ, el tope de la sección y la revisión longitudinal §5.7.3.5.
+        self.aashto_group = QGroupBox("AASHTO LRFD")
+        aashto_layout = QGridLayout()
+        aashto_layout.setVerticalSpacing(5)
+        self.dv_label = self._make_value_label("—")
+        self.beta_theta_label = self._make_value_label("—")
+        self.vn_max_label = self._make_value_label("—")
+        self.long_check_label = self._make_value_label("—")
+        for fila, (texto, widget) in enumerate((
+            ("dv (cortante):", self.dv_label),
+            ("β / θ:", self.beta_theta_label),
+            ("φVn,máx (0.25 f'c b dv):", self.vn_max_label),
+            ("Refuerzo long. §5.7.3.5:", self.long_check_label),
+        )):
+            aashto_layout.addWidget(QLabel(texto), fila, 0)
+            aashto_layout.addWidget(widget, fila, 1)
+        self.aashto_group.setLayout(aashto_layout)
+
         main_layout.addWidget(cap_group)
         if self.is_slab:
-            self.details = DetailsSection("Geometría calculada", geom_group)
+            self.details = DetailsSection(
+                "Geometría calculada", geom_group, self.aashto_group
+            )
         else:
             # La separación adoptada permanece visible; los límites se consultan
             # en el desglose sin repetir el resultado en dos lugares.
@@ -143,7 +174,10 @@ class ShearResultsPanel(QWidget):
             summary_layout.addWidget(QLabel("s adoptado"), 0, 0)
             summary_layout.addWidget(self.s_adopted_label, 0, 1)
             main_layout.addWidget(summary)
-            self.details = DetailsSection("Comprobaciones de cortante", stir_group, geom_group)
+            self.details = DetailsSection(
+                "Comprobaciones de cortante",
+                stir_group, geom_group, self.aashto_group,
+            )
             torsion_groups = self._build_torsion_groups()
             # No se reserva una página vacía para torsión inactiva.
             self.torsion_details = DetailsSection("Comprobaciones de torsión", *torsion_groups[:-1])
@@ -179,15 +213,17 @@ class ShearResultsPanel(QWidget):
 
         rows = [
             ("Tu (demanda):", self.tu_label),
-            ("φTth (umbral, §22.7.4.1):", self.phi_tth_label),
-            ("φTcr (agrietamiento, §22.7.5.1):", self.phi_tcr_label),
+            (("φTth (umbral, §22.7.4.1):", "Umbral 0.25·φTcr (§5.7.2.1):"),
+             self.phi_tth_label),
+            (("φTcr (agrietamiento, §22.7.5.1):",
+              "φTcr (agrietamiento, §5.7.2.1):"), self.phi_tcr_label),
             ("Tu de diseño:", self.tu_design_label),
             ("φTn (con s adoptado):", self.phi_tn_label),
             ("φTn / Tu:", self.torsion_ratio_label),
             ("Régimen:", self.torsion_regime_label),
         ]
         for row, (text, widget) in enumerate(rows):
-            tor_layout.addWidget(QLabel(text), row, 0)
+            tor_layout.addWidget(self._caption(text), row, 0)
             tor_layout.addWidget(widget, row, 1)
         tor_group.setLayout(tor_layout)
         self.torsion_demand_group = tor_group
@@ -205,16 +241,19 @@ class ShearResultsPanel(QWidget):
         self.s_tor_max_label = self._make_value_label("—")
 
         rows = [
-            ("Interacción sección (§22.7.7.1):", self.section_check_label),
+            (("Interacción sección (§22.7.7.1):",
+              "Tope de sección con Vu,eq (§5.7.3.3):"), self.section_check_label),
             ("Av/s (cortante):", self.av_s_label),
             ("At/s (torsión, 1 rama):", self.at_s_label),
             ("(Av+2At)/s requerido:", self.avt_s_label),
-            ("(Av+2At)/s mínimo (§9.6.4.2):", self.avt_s_min_label),
+            (("(Av+2At)/s mínimo (§9.6.4.2):", "Av/s mínimo (§5.7.2.5):"),
+             self.avt_s_min_label),
             ("s por resistencia V+T:", self.s_comb_label),
-            ("s máx. torsión (§9.7.6.3.3):", self.s_tor_max_label),
+            (("s máx. torsión (§9.7.6.3.3):", "s máx. torsión:"),
+             self.s_tor_max_label),
         ]
         for row, (text, widget) in enumerate(rows):
-            comb_layout.addWidget(QLabel(text), row, 0)
+            comb_layout.addWidget(self._caption(text), row, 0)
             comb_layout.addWidget(widget, row, 1)
         comb_group.setLayout(comb_layout)
         self.torsion_combined_group = comb_group
@@ -230,19 +269,24 @@ class ShearResultsPanel(QWidget):
         self.al_bars_label = self._make_value_label("—")
 
         rows = [
-            ("Al requerido (§22.7.6.1b):", self.al_req_label),
-            ("Al mínimo (§9.6.4.3):", self.al_min_label),
+            (("Al requerido (§22.7.6.1b):", "Al adicional (§5.7.3.6.3):"),
+             self.al_req_label),
+            (("Al mínimo (§9.6.4.3):", "Al mínimo (AASHTO no define):"),
+             self.al_min_label),
             ("Al ADOPTADO:", self.al_adopted_label),
             ("Distribución sugerida:", self.al_bars_label),
         ]
         for row, (text, widget) in enumerate(rows):
-            al_layout.addWidget(QLabel(text), row, 0)
+            al_layout.addWidget(self._caption(text), row, 0)
             al_layout.addWidget(widget, row, 1)
 
-        al_note = QLabel(
+        al_note = self._caption((
             "Al se reparte en el perímetro (≥1 barra por esquina, s ≤ 300 mm) y "
-            "se suma al acero de flexión en la zona de tensión."
-        )
+            "se suma al acero de flexión en la zona de tensión.",
+            "AASHTO no calcula un Al aparte: exige que el acero longitudinal "
+            "cubra momento, cortante y torsión a la vez (§5.7.3.6.3). El valor "
+            "de arriba es lo que falta respecto del acero de flexión.",
+        ))
         al_note.setObjectName("infoLabel")
         al_note.setWordWrap(True)
         al_layout.addWidget(al_note, len(rows), 0, 1, 2)
@@ -255,6 +299,21 @@ class ShearResultsPanel(QWidget):
 
         return (self.torsion_demand_group,
                 self.torsion_combined_group, self.torsion_long_group)
+
+    def _caption(self, text) -> QLabel:
+        """Rótulo fijo, o que cambia con la norma si se dan dos textos.
+
+        Con una tupla ``(texto ACI, texto AASHTO)`` el rótulo queda registrado
+        y :meth:`_display_aashto` lo reescribe cada vez que cambia la norma.
+        Así las referencias a artículos no se contradicen con los números que
+        acompañan.
+        """
+        if isinstance(text, tuple):
+            aci, aashto = text
+            label = QLabel(aci)
+            self._code_captions.append((label, aci, aashto))
+            return label
+        return QLabel(text)
 
     def _make_value_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -314,6 +373,9 @@ class ShearResultsPanel(QWidget):
             else:
                 self.s_adopted_label.setText("— (sin estribos)")
 
+        # Bloque propio de AASHTO
+        self._display_aashto(result, cv)
+
         # Torsión (sólo viga)
         if not self.is_slab:
             self._display_torsion(result, cv)
@@ -328,6 +390,42 @@ class ShearResultsPanel(QWidget):
             self.warnings_label.setVisible(True)
         else:
             self.warnings_label.setVisible(False)
+
+    def _display_aashto(self, result: ShearResultT, cv):
+        """Llena (o esconde) los valores que sólo existen bajo AASHTO."""
+        aplica = code_of(result) is DesignCode.AASHTO_LRFD_2020
+        self.aashto_group.setVisible(aplica)
+
+        for label, texto_aci, texto_aashto in self._code_captions:
+            label.setText(texto_aashto if aplica else texto_aci)
+
+        if not aplica:
+            return
+
+        self.dv_label.setText(
+            f"{cv.format_length_small(result.dv_mm, 2)}  "
+            f"({result.dv_governing})"
+        )
+        self.beta_theta_label.setText(
+            f"{result.beta:.1f} / {result.theta_deg:.0f}°"
+        )
+        self.vn_max_label.setText(
+            _force_in_user_unit(result.phi_vn_max_kn, cv)
+        )
+
+        if not getattr(result, "long_check_applies", False):
+            self.long_check_label.setText("— (sin datos)")
+            self.long_check_label.setStyleSheet("")
+            return
+        ok = result.long_reinf_ok
+        self.long_check_label.setText(
+            f"{_force_in_user_unit(result.long_capacity_n / 1000.0, cv)} de "
+            f"{_force_in_user_unit(result.long_demand_n / 1000.0, cv)}"
+            f"  {'✓' if ok else '✗'}"
+        )
+        self.long_check_label.setStyleSheet(
+            f"color: {PALETTE.ok if ok else PALETTE.error}; font-weight: bold;"
+        )
 
     def _display_torsion(self, result: ShearResultT, cv):
         """Llena (o esconde) los grupos de torsión."""
@@ -387,13 +485,21 @@ class ShearResultsPanel(QWidget):
             cv.format_length_small(result.s_combined_required_mm, 1)
             if result.s_combined_required_mm > 0 else "—"
         )
+        # AASHTO no define una separación máxima propia de torsión ni un A_l
+        # mínimo separado; un 0.00 se leería como un límite que no existe.
+        # Bajo ACI, en cambio, un A_l,min nulo es un resultado legítimo.
+        es_aashto = code_of(result) is DesignCode.AASHTO_LRFD_2020
         self.s_tor_max_label.setText(
-            cv.format_length_small(result.s_torsion_max_mm, 1)
+            "no aplica" if es_aashto
+            else cv.format_length_small(result.s_torsion_max_mm, 1)
         )
 
         # Acero longitudinal
         self.al_req_label.setText(cv.format_area(result.al_required_mm2 / 100.0))
-        self.al_min_label.setText(cv.format_area(result.al_min_mm2 / 100.0))
+        self.al_min_label.setText(
+            "no aplica" if es_aashto
+            else cv.format_area(result.al_min_mm2 / 100.0)
+        )
         self.al_adopted_label.setText(cv.format_area(result.al_adopted_mm2 / 100.0))
         if result.long_bars is not None:
             bars = result.long_bars
@@ -424,6 +530,7 @@ class ShearResultsPanel(QWidget):
         color_map = {
             "OK": (PALETTE.ok, "Diseño correcto"),
             "NO REQUIERE ESTRIBOS": (PALETTE.ok, "No requiere estribos"),
+            "ARMADO INSUFICIENTE": (PALETTE.error, "Armado insuficiente"),
             "AUMENTAR SECCIÓN": (PALETTE.error, "Aumentar sección"),
             "ERROR": (PALETTE.error, "Datos inválidos"),
         }

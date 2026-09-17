@@ -1,8 +1,12 @@
-"""Diagrama de esfuerzos para sección a flexión (ACI 318).
+"""Diagrama de esfuerzos para sección a flexión.
+
+Sirve a las dos normas: el bloque rectangular equivalente tiene la misma forma
+en ACI 318-19 y en AASHTO LRFD, y sólo cambia el esfuerzo uniforme (0.85·f'c en
+ACI; α₁·f'c en AASHTO, que baja por encima de 70 MPa).
 
 Muestra:
 - Sección transversal (b × h)
-- Bloque de Whitney (área de compresión a = β₁·c)
+- Bloque de compresión (área a = β₁·c)
 - Eje neutro
 - Acero de tensión (As)
 - Vectores de fuerza: C (compresión) y T (tensión)
@@ -18,6 +22,7 @@ from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont, QPolygonF
 )
 
+from core.design_code import code_of, spec
 from core.flexion import FlexionDesignResult
 from core.units import UnitSystem, get_converter
 from ui.theme import PALETTE
@@ -112,7 +117,8 @@ class StressDiagramWidget(QWidget):
         painter.drawText(
             QRectF(0, H - 35, W, 25),
             int(Qt.AlignmentFlag.AlignCenter),
-            "Sección transversal  ←→  Diagrama de esfuerzos (Bloque de Whitney – ACI 318)"
+            "Sección transversal  ←→  Diagrama de esfuerzos "
+            f"(bloque rectangular equivalente – {spec(code_of(self.result)).label})"
         )
 
     def _draw_section(self, p: QPainter, x: float, y: float, b_px: float, h_px: float,
@@ -214,20 +220,21 @@ class StressDiagramWidget(QWidget):
         a_px = min(r.a_mm * scale, h_px)
         stress_block_w = w * 0.35
 
-        # Bloque de compresión (esfuerzo uniforme 0.85·f'c)
+        # Bloque de compresión (esfuerzo uniforme α₁·f'c)
         if a_px > 0:
             p.setPen(QPen(_qc(PALETTE.compression), 1.5))
             p.setBrush(QBrush(_qc(PALETTE.compression, 170)))
             block_rect = QRectF(ref_x - stress_block_w, y, stress_block_w, a_px)
             p.drawRect(block_rect)
 
-            # Etiqueta 0.85·f'c
+            # ACI usa siempre 0.85; AASHTO lo reduce por encima de 70 MPa.
+            alpha_1 = getattr(r, "alpha_1", 0.85)
             p.setPen(_qc(PALETTE.text_primary))
             p.setFont(QFont("Sans", 8, QFont.Weight.Bold))
             p.drawText(
                 QRectF(ref_x - stress_block_w, y - 14, stress_block_w, 12),
                 int(Qt.AlignmentFlag.AlignCenter),
-                "0.85·f'c"
+                f"{alpha_1:.2f}·f'c"
             )
 
             # Vector de compresión C

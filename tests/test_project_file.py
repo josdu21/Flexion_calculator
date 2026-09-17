@@ -11,7 +11,10 @@ from uuid import uuid4
 
 from PyQt6.QtWidgets import QApplication
 
-from core.project import ProjectInfo, Study, StudyFileError, load_study, save_study
+from core.design_code import DesignCode
+from core.project import (
+    FILE_VERSION, ProjectInfo, Study, StudyFileError, load_study, save_study,
+)
 from core.units import UnitSystem
 from ui.main_window import MainWindow
 
@@ -143,6 +146,49 @@ class StudyFile(unittest.TestCase):
         data["cajetin"]["campo_nuevo"] = "algo"
         destino.write_text(json.dumps(data), encoding='utf-8')
         self.assertEqual(load_study(destino).info.project, "X")
+
+    def test_a_v1_file_opens_as_aci(self):
+        # Los estudios guardados con la 2.0.0 no traen norma: eran todos ACI.
+        import json
+        destino = self.folder / "viejo.json"
+        save_study(destino, Study(
+            info=ProjectInfo(project="Obra vieja"),
+            panels={k: p.get_state() for k, p in self.window._panels().items()},
+        ))
+        data = json.loads(destino.read_text(encoding='utf-8'))
+        data["version"] = 1
+        del data["norma"]
+        destino.write_text(json.dumps(data), encoding='utf-8')
+
+        estudio = load_study(destino)
+        self.assertEqual(estudio.code, DesignCode.ACI_318_19)
+        self.assertEqual(estudio.info.project, "Obra vieja")
+
+        # Y la ventana debe abrirlo sin quejarse, quedando en ACI.
+        self.window.code_combo.setCurrentIndex(
+            self.window.code_combo.findData(DesignCode.AASHTO_LRFD_2020)
+        )
+        self._open_from(destino)
+        self.assertEqual(self.window.current_code, DesignCode.ACI_318_19)
+
+    def test_a_file_from_a_newer_version_is_refused(self):
+        import json
+        destino = self.folder / "nuevo.json"
+        save_study(destino, Study(info=ProjectInfo()))
+        data = json.loads(destino.read_text(encoding='utf-8'))
+        data["version"] = FILE_VERSION + 1
+        destino.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaises(StudyFileError):
+            load_study(destino)
+
+    def test_an_unknown_code_name_falls_back_instead_of_crashing(self):
+        import json
+        destino = self.folder / "raro.json"
+        save_study(destino, Study(info=ProjectInfo()))
+        data = json.loads(destino.read_text(encoding='utf-8'))
+        data["norma"] = "EUROCODIGO_2"
+        destino.write_text(json.dumps(data), encoding='utf-8')
+        self.assertEqual(load_study(destino).code, DesignCode.ACI_318_19)
 
 
 if __name__ == '__main__':

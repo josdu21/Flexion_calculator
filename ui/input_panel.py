@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
+from core.design_code import DEFAULT_CODE, DesignCode
 from core.flexion import ReinforcementConfig, RebarLayer
 from ui.form_helpers import scroll_form, set_si, set_choice
 
@@ -14,16 +15,28 @@ MAX_LAYERS = 4
 MAIN_BAR_NUMBERS = [3, 4, 5, 6, 8, 10, 12]
 STIRRUP_BAR_NUMBERS = [2, 3, 4, 5]
 
+# AASHTO §5.6.3.3 (γ₃) y §5.6.7 (γ_e); sólo se piden bajo esa norma.
+BAR_SPECS = [
+    ("ASTM A615 (γ₃ = 0.67)", "A615"),
+    ("ASTM A706 (γ₃ = 0.75)", "A706"),
+]
+EXPOSURE_CLASSES = [
+    ("Clase 1 — normal (γe = 1.00)", 1),
+    ("Clase 2 — severa (γe = 0.75)", 2),
+]
+
 
 class InputPanel(QWidget):
     """Panel de entradas para diseño por flexión con configuración de refuerzo."""
 
     values_changed = pyqtSignal()
 
-    def __init__(self, unit_system: UnitSystem, is_slab: bool = False):
+    def __init__(self, unit_system: UnitSystem, is_slab: bool = False,
+                 design_code: DesignCode = DEFAULT_CODE):
         super().__init__()
         self.unit_system = unit_system
         self.is_slab = is_slab
+        self.design_code = design_code
         self._building = True
         self._build_ui()
         self._building = False
@@ -195,8 +208,58 @@ class InputPanel(QWidget):
 
         rebar_group.setLayout(rebar_layout)
 
-        self.form_scroll = scroll_form(load_group, geom_group, mat_group, rebar_group)
+        # ----- Datos propios de AASHTO -----
+        # Visible sólo bajo esa norma: ACI no usa ninguno de estos valores.
+        self.aashto_group = QGroupBox("AASHTO LRFD")
+        aashto_layout = QGridLayout()
+        aashto_layout.setVerticalSpacing(6)
+
+        aashto_layout.addWidget(QLabel("Tipo de barra:"), 0, 0)
+        self.bar_spec_combo = QComboBox()
+        for etiqueta, dato in BAR_SPECS:
+            self.bar_spec_combo.addItem(etiqueta, dato)
+        self.bar_spec_combo.setToolTip(
+            "γ₃ del momento de fisuración M_cr (§5.6.3.3)"
+        )
+        self.bar_spec_combo.currentIndexChanged.connect(self._emit_if_ready)
+        aashto_layout.addWidget(self.bar_spec_combo, 0, 1, 1, 2)
+
+        aashto_layout.addWidget(QLabel("Exposición:"), 1, 0)
+        self.exposure_combo = QComboBox()
+        for etiqueta, dato in EXPOSURE_CLASSES:
+            self.exposure_combo.addItem(etiqueta, dato)
+        self.exposure_combo.setToolTip(
+            "γ_e del control de fisuración (§5.6.7)"
+        )
+        self.exposure_combo.currentIndexChanged.connect(self._emit_if_ready)
+        aashto_layout.addWidget(self.exposure_combo, 1, 1, 1, 2)
+
+        self.ms_spinbox = self._make_spinbox(
+            value=0.0, rng=(0.0, converter.range_mu[1]),
+            decimals=converter.decimals_moment,
+            step=max(0.1, converter.default_mu * 0.05),
+        )
+        self.ms_spinbox.setToolTip(
+            "Momento de servicio para el control de fisuración (§5.6.7).\n"
+            "En cero, esa verificación se omite."
+        )
+        self._add_field(aashto_layout, 2, "Ms (servicio)",
+                        converter.moment_unit, self.ms_spinbox)
+
+        nota = QLabel(
+            "Ms en cero omite el control de fisuración de §5.6.7."
+        )
+        nota.setObjectName("infoLabel")
+        nota.setWordWrap(True)
+        aashto_layout.addWidget(nota, 3, 0, 1, 3)
+        self.aashto_group.setLayout(aashto_layout)
+
+        self.form_scroll = scroll_form(
+            load_group, geom_group, mat_group, rebar_group, self.aashto_group
+        )
         main_layout.addWidget(self.form_scroll)
+
+        self._apply_design_code()
 
         # Conectar señales DESPUÉS de crear widgets
         self._connect_signals()
@@ -227,11 +290,17 @@ class InputPanel(QWidget):
 
     def _connect_signals(self):
         for sb in [self.mu_spinbox, self.h_spinbox, self.cover_spinbox,
-                   self.fc_spinbox, self.fy_spinbox]:
+                   self.fc_spinbox, self.fy_spinbox, self.ms_spinbox]:
             if sb is not None:
                 sb.valueChanged.connect(self._emit_if_ready)
         if self.b_spinbox is not None:
             self.b_spinbox.valueChanged.connect(self._emit_if_ready)
+
+    def _apply_design_code(self):
+        """Muestra los campos propios de AASHTO sólo cuando esa norma rige."""
+        self.aashto_group.setVisible(
+            self.design_code is DesignCode.AASHTO_LRFD_2020
+        )
 
     def _emit_if_ready(self):
         if not self._building:
@@ -249,14 +318,32 @@ class InputPanel(QWidget):
 
     def update_unit_system(self, unit_system: UnitSystem):
         self._building = True
+        # Reconstruir la UI pierde los combos, así que se rescatan antes.
+        estado_aashto = (
+            self.bar_spec_combo.currentData(),
+            self.exposure_combo.currentData(),
+            self.ms_spinbox.value() * get_converter(self.unit_system).moment_to_knm,
+        )
         self.unit_system = unit_system
         old_layout = self.layout()
         if old_layout is not None:
             self._clear_layout(old_layout)
             QWidget().setLayout(old_layout)
         self._build_ui()
+        bar_spec, exposure, ms_knm = estado_aashto
+        set_choice(self.bar_spec_combo, bar_spec)
+        set_choice(self.exposure_combo, exposure)
+        set_si(self.ms_spinbox, ms_knm, get_converter(unit_system).moment_to_knm)
         self._building = False
         self.values_changed.emit()
+
+    def set_design_code(self, code: DesignCode):
+        """Cambia la norma activa y ajusta qué campos se muestran."""
+        if code == self.design_code:
+            return
+        self.design_code = code
+        self._apply_design_code()
+        self._emit_if_ready()
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -318,6 +405,9 @@ class InputPanel(QWidget):
                             if self.stirrup_combo else None),
             "n_layers": self.layers_spin.value() if self.layers_spin else 1,
             "layer_bars": [s.value() for s in self.layer_bar_spins],
+            "bar_spec": self.bar_spec_combo.currentData(),
+            "exposure_class": self.exposure_combo.currentData(),
+            "ms_nmm": self.ms_spinbox.value() * cv.moment_to_knm * 1e6,
         }
 
     def set_state(self, state: dict) -> None:
@@ -334,6 +424,9 @@ class InputPanel(QWidget):
             set_si(self.fy_spinbox, state.get("fy_mpa"), cv.stress_to_mpa)
             set_choice(self.main_bar_combo, state.get("main_bar"))
             set_choice(self.stirrup_combo, state.get("stirrup_bar"))
+            set_choice(self.bar_spec_combo, state.get("bar_spec"))
+            set_choice(self.exposure_combo, state.get("exposure_class"))
+            set_si(self.ms_spinbox, state.get("ms_nmm"), 1e6 * cv.moment_to_knm)
 
             if self.layers_spin is not None and state.get("n_layers"):
                 self.layers_spin.setValue(int(state["n_layers"]))
@@ -360,6 +453,8 @@ class InputPanel(QWidget):
         fc_mpa = self.fc_spinbox.value() * converter.stress_to_mpa
         fy_mpa = self.fy_spinbox.value() * converter.stress_to_mpa
 
+        # Se emite siempre el superconjunto de las dos normas; el despachador
+        # de core/design_code.py entrega a cada motor sólo lo que acepta.
         return {
             "mu_nmm": mu_nmm,
             "b_mm": b_mm,
@@ -368,4 +463,8 @@ class InputPanel(QWidget):
             "fc_mpa": fc_mpa,
             "fy_mpa": fy_mpa,
             "reinforcement": self.get_reinforcement_config(),
+            "bar_spec": self.bar_spec_combo.currentData(),
+            "exposure_class": self.exposure_combo.currentData(),
+            "ms_nmm": self.ms_spinbox.value() * converter.moment_to_knm * 1e6,
+            "lam": 1.0,
         }

@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from core.design_code import DesignCode, code_of
 from core.flexion import FlexionDesignResult
 from core.units import get_converter, UnitSystem
 from ui.stress_diagram import StressDiagramWidget
@@ -41,7 +42,7 @@ class ResultsPanel(QWidget):
         main_layout.addWidget(title)
 
         # Diagrama de esfuerzos
-        diagram_group = QGroupBox("Diagrama de esfuerzos (ACI 318 — Bloque de Whitney)")
+        diagram_group = QGroupBox("Diagrama de esfuerzos (bloque rectangular equivalente)")
         diagram_layout = QVBoxLayout()
         self.diagram = StressDiagramWidget()
         self.diagram.setMinimumHeight(260)
@@ -73,7 +74,10 @@ class ResultsPanel(QWidget):
         steel_layout.addWidget(self.as_required_label, 1, 1)
         steel_layout.addWidget(QLabel("As mínimo:"), 2, 0)
         steel_layout.addWidget(self.as_min_label, 2, 1)
-        steel_layout.addWidget(QLabel("As máximo:"), 3, 0)
+        # El rótulo cambia con la norma: AASHTO no define un máximo, sino el
+        # acero con el que la sección pasa a ser de compresión controlada.
+        self.as_max_caption = QLabel("As máximo:")
+        steel_layout.addWidget(self.as_max_caption, 3, 0)
         steel_layout.addWidget(self.as_max_label, 3, 1)
         steel_group.setLayout(steel_layout)
 
@@ -117,7 +121,7 @@ class ResultsPanel(QWidget):
 
 
         # Separación de barras (NUEVO)
-        spacing_group = QGroupBox("Separación entre barras (ACI 318-19)")
+        spacing_group = QGroupBox("Separación entre barras")
         spacing_layout = QGridLayout()
         spacing_layout.setVerticalSpacing(5)
 
@@ -172,10 +176,35 @@ class ResultsPanel(QWidget):
         forces_layout.addWidget(self.rho_label, 2, 1)
         forces_group.setLayout(forces_layout)
 
+        # Propio de AASHTO: φ variable, refuerzo mínimo por momento y fisuración.
+        # Oculto bajo ACI, donde ninguno de estos valores existe.
+        self.aashto_group = QGroupBox("AASHTO LRFD")
+        aashto_layout = QGridLayout()
+        aashto_layout.setVerticalSpacing(5)
+        self.phi_label = self._make_value_label("—")
+        self.eps_t_label = self._make_value_label("—")
+        self.behaviour_label = self._make_value_label("—")
+        self.mcr_label = self._make_value_label("—")
+        self.mu_min_label = self._make_value_label("—")
+        self.crack_label = self._make_value_label("—")
+
+        for fila, (texto, widget) in enumerate((
+            ("φ aplicado:", self.phi_label),
+            ("εt (acero extremo):", self.eps_t_label),
+            ("Comportamiento:", self.behaviour_label),
+            ("Mcr (§5.6.3.3):", self.mcr_label),
+            ("Mu,mín exigido:", self.mu_min_label),
+            ("Sep. máx. fisuración:", self.crack_label),
+        )):
+            aashto_layout.addWidget(QLabel(texto), fila, 0)
+            aashto_layout.addWidget(widget, fila, 1)
+        self.aashto_group.setLayout(aashto_layout)
+
         main_layout.addWidget(ResponsiveColumns(steel_group, cap_group))
         main_layout.addWidget(diagram_group)
         self.details = DetailsSection(
-            "Comprobaciones y valores intermedios", spacing_group, geom_group, forces_group
+            "Comprobaciones y valores intermedios",
+            spacing_group, geom_group, forces_group, self.aashto_group,
         )
         main_layout.addWidget(self.details)
 
@@ -272,6 +301,9 @@ class ResultsPanel(QWidget):
             applies=(result.vertical_spacing_mm > 0)
         )
 
+        # Bloque propio de AASHTO
+        self._display_aashto(result, cv)
+
         # Estado
         self._update_status_banner(result.status)
 
@@ -285,6 +317,50 @@ class ResultsPanel(QWidget):
 
         # Diagrama
         self.diagram.set_result(result, self.unit_system)
+
+    def _display_aashto(self, result, cv):
+        """Llena (o esconde) los valores que sólo existen bajo AASHTO."""
+        aplica = code_of(result) is DesignCode.AASHTO_LRFD_2020
+        self.aashto_group.setVisible(aplica)
+
+        if aplica:
+            self.as_max_caption.setText("As en εt = εcl:")
+            self.as_max_caption.setToolTip(
+                "AASHTO no fija un As máximo. Es el acero con el que la sección\n"
+                "llega a compresión controlada y φ cae a 0.75 (§5.5.4.2)."
+            )
+            self.as_min_caption_tip = (
+                "Área equivalente al mínimo por momento de §5.6.3.3:\n"
+                "M_r ≥ min(1.33·M_u, M_cr)."
+            )
+            self.as_min_label.setToolTip(self.as_min_caption_tip)
+        else:
+            self.as_max_caption.setText("As máximo:")
+            self.as_max_caption.setToolTip("")
+            self.as_min_label.setToolTip("")
+
+        if not aplica:
+            return
+
+        self.phi_label.setText(f"{result.phi_flexion:.3f}")
+        # φ por debajo de 0.90 es la señal de que la sección está sobrearmada.
+        color = PALETTE.ok if result.phi_flexion >= 0.90 else PALETTE.warning
+        self.phi_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+        self.eps_t_label.setText(f"{result.epsilon_t:.5f}")
+        self.behaviour_label.setText(result.section_behaviour.capitalize())
+
+        m = lambda knm: f"{knm / cv.moment_to_knm:.2f} {cv.moment_unit}"
+        self.mcr_label.setText(m(result.mcr_knm))
+        self.mu_min_label.setText(m(result.mu_min_knm))
+
+        if result.crack_control_applies:
+            texto = cv.format_length_small(result.crack_spacing_max_mm, 1)
+            if not result.crack_control_ok:
+                texto += "  ✗"
+            self.crack_label.setText(texto)
+        else:
+            self.crack_label.setText("— (falta Ms)")
 
     def _set_status_chip(self, label: QLabel, ok: bool, applies: bool = True):
         if not applies:

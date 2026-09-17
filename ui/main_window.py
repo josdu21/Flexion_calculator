@@ -10,9 +10,10 @@ from PyQt6.QtCore import Qt, QSignalBlocker
 
 from core.version import APP_NAME, APP_TAGLINE, __version__
 from core.units import UnitSystem
-from core.flexion import BeamSection
-from core.shear import SlabShearCheck
-from core.torsion import BeamShearTorsionDesign
+from core.design_code import (
+    DEFAULT_CODE, DesignCode, beam_shear_design, flexure_design,
+    slab_shear_check, spec,
+)
 from core.report import generate_beam_report, generate_slab_report
 from core.project import (
     FILE_FILTER, ProjectInfo, Study, StudyFileError, load_study, save_study,
@@ -25,7 +26,7 @@ from ui.shear_results_panel import ShearResultsPanel
 from ui.theme import build_stylesheet
 
 
-APP_TITLE = f"{APP_NAME} {__version__} — Flexión, Cortante y Torsión (ACI 318-19)"
+APP_TITLE = f"{APP_NAME} {__version__} — Flexión, Cortante y Torsión"
 
 
 def _slug(name: str) -> str:
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_unit_system = UnitSystem.SI
+        self.current_code = DEFAULT_CODE
         self.project_info = ProjectInfo()
         self.current_path = None
         self._initializing = True
@@ -79,6 +81,21 @@ class MainWindow(QMainWindow):
         identity.addWidget(subtitle)
         header_layout.addLayout(identity)
         header_layout.addStretch()
+        code_label = QLabel("Normativa")
+        header_layout.addWidget(code_label)
+        self.code_combo = QComboBox()
+        for norma in DesignCode:
+            self.code_combo.addItem(spec(norma).label, norma)
+        self.code_combo.setCurrentIndex(self.code_combo.findData(DEFAULT_CODE))
+        self.code_combo.setAccessibleName("Norma de diseño")
+        self.code_combo.setToolTip(
+            "Norma con la que se calculan los cuatro análisis y que se "
+            "registra en la memoria"
+        )
+        code_label.setBuddy(self.code_combo)
+        self.code_combo.currentIndexChanged.connect(self._on_code_changed)
+        header_layout.addWidget(self.code_combo)
+
         unit_label = QLabel("Unidades")
         header_layout.addWidget(unit_label)
         self.unit_combo = QComboBox()
@@ -148,7 +165,8 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        inputs = InputPanel(self.current_unit_system, is_slab=is_slab)
+        inputs = InputPanel(self.current_unit_system, is_slab=is_slab,
+                            design_code=self.current_code)
         results = ResultsPanel(self.current_unit_system)
 
         if is_slab:
@@ -174,13 +192,15 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
 
         if is_slab:
-            inputs = SlabShearInputPanel(self.current_unit_system)
+            inputs = SlabShearInputPanel(self.current_unit_system,
+                                         design_code=self.current_code)
             results = ShearResultsPanel(self.current_unit_system, is_slab=True)
             self.slab_shear_inputs = inputs
             self.slab_shear_results = results
             inputs.values_changed.connect(self.calculate_slab_shear)
         else:
-            inputs = BeamShearInputPanel(self.current_unit_system)
+            inputs = BeamShearInputPanel(self.current_unit_system,
+                                         design_code=self.current_code)
             results = ShearResultsPanel(self.current_unit_system, is_slab=False)
             self.beam_shear_inputs = inputs
             self.beam_shear_results = results
@@ -235,6 +255,24 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------
+    #                      Cambio de normativa
+    # ------------------------------------------------------------
+
+    def _on_code_changed(self):
+        self.current_code = self.code_combo.currentData()
+        for panel in (self.beam_flex_inputs, self.slab_flex_inputs,
+                      self.beam_shear_inputs, self.slab_shear_inputs):
+            panel.set_design_code(self.current_code)
+        self.calculate_beam_flex()
+        self.calculate_slab_flex()
+        self.calculate_beam_shear()
+        self.calculate_slab_shear()
+        self._on_analysis_changed()
+        self.statusBar().showMessage(
+            f"Norma cambiada a: {spec(self.current_code).label}", 4000
+        )
+
+    # ------------------------------------------------------------
     #                       Cálculos
     # ------------------------------------------------------------
 
@@ -250,7 +288,10 @@ class MainWindow(QMainWindow):
             alcance = f"{self.project_info.beam_name} — flexión, cortante y torsión"
         else:
             alcance = f"{self.project_info.slab_name} — flexión y cortante"
-        self.report_button.setToolTip(f"Exportar memoria: {alcance} (Ctrl+E)")
+        self.report_button.setToolTip(
+            f"Exportar memoria: {alcance}, según "
+            f"{spec(self.current_code).label} (Ctrl+E)"
+        )
         self.statusBar().showMessage(self.tabs.tabText(self.tabs.currentIndex()))
 
     def _connect_shared_sections(self):
@@ -287,23 +328,38 @@ class MainWindow(QMainWindow):
 
     def _beam_flex_design(self):
         """Diseño a flexión de la viga, usado también por el análisis de cortante."""
-        return BeamSection(**self.beam_flex_inputs.get_values()).design()
+        return flexure_design(
+            self.current_code, **self.beam_flex_inputs.get_values()
+        )
 
     def _slab_flex_design(self):
         """Diseño a flexión de la losa, usado también por el análisis de cortante."""
-        return BeamSection(**self.slab_flex_inputs.get_values()).design()
+        return flexure_design(
+            self.current_code, **self.slab_flex_inputs.get_values()
+        )
 
     def _beam_shear_design(self):
-        """Cortante/torsión de la viga con el d real del diseño a flexión."""
+        """Cortante/torsión de la viga alimentado por el diseño a flexión.
+
+        AASHTO necesita además el bloque de compresión (para d_v) y el momento
+        con el acero longitudinal (para la revisión de §5.7.3.5); todo eso sale
+        del mismo diseño a flexión, así que no se le pide nada extra al usuario.
+        """
+        flexion = self._beam_flex_design()
         values = self.beam_shear_inputs.get_values()
-        values["d_mm"] = self._beam_flex_design().d_mm
-        return BeamShearTorsionDesign(**values).design()
+        values["d_mm"] = flexion.d_mm
+        values["a_mm"] = flexion.a_mm
+        values["mu_nmm"] = flexion.mu_demand_knm * 1e6
+        values["as_long_mm2"] = flexion.as_provided_cm2 * 100.0
+        return beam_shear_design(self.current_code, **values)
 
     def _slab_shear_check(self):
-        """Cortante de la losa con la cuantía longitudinal del diseño a flexión."""
+        """Cortante de la losa alimentado por el diseño a flexión de la franja."""
+        flexion = self._slab_flex_design()
         values = self.slab_shear_inputs.get_values()
-        values["as_long_mm2"] = self._slab_flex_design().as_provided_cm2 * 100.0
-        return SlabShearCheck(**values).check()
+        values["as_long_mm2"] = flexion.as_provided_cm2 * 100.0
+        values["a_mm"] = flexion.a_mm
+        return slab_shear_check(self.current_code, **values)
 
     def calculate_beam_flex(self):
         if self._initializing:
@@ -402,6 +458,7 @@ class MainWindow(QMainWindow):
                 info=self.project_info,
                 unit_system=self.current_unit_system,
                 panels={k: p.get_state() for k, p in self._panels().items()},
+                code=self.current_code,
             ))
         except OSError as e:
             QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar:\n\n{e}")
@@ -428,6 +485,9 @@ class MainWindow(QMainWindow):
             self.unit_combo.setCurrentIndex(
                 self.unit_combo.findData(study.unit_system)
             )
+        # La norma decide qué campos se muestran: también va antes de cargar.
+        if study.code != self.current_code:
+            self.code_combo.setCurrentIndex(self.code_combo.findData(study.code))
 
         self._initializing = True
         try:

@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
+from core.design_code import DEFAULT_CODE, DesignCode
 from ui.form_helpers import scroll_form, set_si, set_choice
 
 
@@ -99,9 +100,11 @@ class BeamShearInputPanel(QWidget):
 
     values_changed = pyqtSignal()
 
-    def __init__(self, unit_system: UnitSystem):
+    def __init__(self, unit_system: UnitSystem,
+                 design_code: DesignCode = DEFAULT_CODE):
         super().__init__()
         self.unit_system = unit_system
+        self.design_code = design_code
         self._building = True
         self._build_ui()
         self._building = False
@@ -139,7 +142,9 @@ class BeamShearInputPanel(QWidget):
         # Torsión (grupo activable)
         self.torsion_group = QGroupBox("Incluir torsión · Tu")
         self.torsion_group.setAccessibleName("Incluir torsión en el diseño de viga")
-        self.torsion_group.setToolTip("Activa el diseño combinado de cortante y torsión (ACI 318-19 §22.7)")
+        self.torsion_group.setToolTip(
+            "Activa el diseño combinado de cortante y torsión"
+        )
         self.torsion_group.setCheckable(True)
         self.torsion_group.setChecked(False)
         self.torsion_group.toggled.connect(self._emit_if_ready)
@@ -169,13 +174,10 @@ class BeamShearInputPanel(QWidget):
         )
         _add_field(tor_layout, 2, "fy (long. torsión)", cv.stress_unit, self.fy_long_spinbox)
 
-        tor_note = QLabel(
-            "En torsión por compatibilidad, Tu puede reducirse a φTcr "
-            "(§22.7.3.2). Requiere estribos cerrados y acero longitudinal Al."
-        )
-        tor_note.setObjectName("infoLabel")
-        tor_note.setWordWrap(True)
-        tor_layout.addWidget(tor_note, 3, 0, 1, 3)
+        self.tor_note = QLabel()
+        self.tor_note.setObjectName("infoLabel")
+        self.tor_note.setWordWrap(True)
+        tor_layout.addWidget(self.tor_note, 3, 0, 1, 3)
 
 
         # Geometría
@@ -255,13 +257,10 @@ class BeamShearInputPanel(QWidget):
         self.db_long_combo.currentIndexChanged.connect(self._emit_if_ready)
         stirrup_layout.addWidget(self.db_long_combo, 2, 1, 1, 2)
 
-        note = QLabel(
-            "ACI 318-19 §22.5 / §9.6.3 / §9.7.6.2.2 (cortante) y §22.7 / §9.6.4 / "
-            "§9.7.6.3 (torsión). φ = 0.75, λ = 1.0, θ = 45°."
-        )
-        note.setObjectName("infoLabel")
-        note.setWordWrap(True)
-        stirrup_layout.addWidget(note, 3, 0, 1, 3)
+        self.code_note = QLabel()
+        self.code_note.setObjectName("infoLabel")
+        self.code_note.setWordWrap(True)
+        stirrup_layout.addWidget(self.code_note, 3, 0, 1, 3)
 
         stirrup_group.setLayout(stirrup_layout)
 
@@ -282,7 +281,39 @@ class BeamShearInputPanel(QWidget):
             load_group, self.torsion_group, geom_group, mat_group, stirrup_group
         )
         main_layout.addWidget(self.form_scroll)
+        self._apply_design_code()
         self._connect_signals()
+
+    def _apply_design_code(self):
+        """Ajusta las notas de norma; el cortante no cambia de campos."""
+        if self.design_code is DesignCode.AASHTO_LRFD_2020:
+            self.code_note.setText(
+                "AASHTO LRFD §5.7.2 / §5.7.3 (cortante) y §5.7.2.1 / §5.7.3.6 "
+                "(torsión), procedimiento simplificado de §5.7.3.4.1: "
+                "φ = 0.90, β = 2.0, θ = 45°, λ = 1.0. El cortante se evalúa "
+                "sobre dv, no sobre d."
+            )
+            self.tor_note.setText(
+                "AASHTO no admite reducir Tu por compatibilidad como ACI: se "
+                "diseña para la torsión de equilibrio completa. Requiere "
+                "estribos cerrados y acero longitudinal en el perímetro."
+            )
+        else:
+            self.code_note.setText(
+                "ACI 318-19 §22.5 / §9.6.3 / §9.7.6.2.2 (cortante) y §22.7 / "
+                "§9.6.4 / §9.7.6.3 (torsión). φ = 0.75, λ = 1.0, θ = 45°."
+            )
+            self.tor_note.setText(
+                "En torsión por compatibilidad, Tu puede reducirse a φTcr "
+                "(§22.7.3.2). Requiere estribos cerrados y acero longitudinal Al."
+            )
+
+    def set_design_code(self, code: DesignCode):
+        if code == self.design_code:
+            return
+        self.design_code = code
+        self._apply_design_code()
+        self._emit_if_ready()
 
     def _connect_signals(self):
         for sb in [self.vu_spinbox, self.tu_spinbox, self.b_spinbox, self.h_spinbox,
@@ -403,9 +434,11 @@ class SlabShearInputPanel(QWidget):
 
     values_changed = pyqtSignal()
 
-    def __init__(self, unit_system: UnitSystem):
+    def __init__(self, unit_system: UnitSystem,
+                 design_code: DesignCode = DEFAULT_CODE):
         super().__init__()
         self.unit_system = unit_system
+        self.design_code = design_code
         self._building = True
         self._build_ui()
         self._building = False
@@ -494,19 +527,39 @@ class SlabShearInputPanel(QWidget):
         self.db_long_combo.currentIndexChanged.connect(self._emit_if_ready)
         ref_layout.addWidget(self.db_long_combo, 0, 1, 1, 2)
 
-        note = QLabel(
-            "ACI 318-19 §22.5 (una dirección). Las losas no pueden llevar "
-            "refuerzo por cortante (§8.6.1); si falla, aumentar h o f'c."
-        )
-        note.setObjectName("infoLabel")
-        note.setWordWrap(True)
-        ref_layout.addWidget(note, 1, 0, 1, 3)
+        self.code_note = QLabel()
+        self.code_note.setObjectName("infoLabel")
+        self.code_note.setWordWrap(True)
+        ref_layout.addWidget(self.code_note, 1, 0, 1, 3)
         ref_group.setLayout(ref_layout)
 
         self.form_scroll = scroll_form(load_group, geom_group, mat_group, ref_group)
         main_layout.addWidget(self.form_scroll)
 
+        self._apply_design_code()
         self._connect_signals()
+
+    def _apply_design_code(self):
+        if self.design_code is DesignCode.AASHTO_LRFD_2020:
+            self.code_note.setText(
+                "AASHTO LRFD §5.7.3, procedimiento simplificado de §5.7.3.4.1 "
+                "(β = 2.0, θ = 45°, φ = 0.90), evaluado sobre dv. Ese "
+                "procedimiento sólo cubre elementos sin estribos si h < 400 mm; "
+                "por encima, la app avisa que el resultado no sirve como "
+                "verificación normativa."
+            )
+        else:
+            self.code_note.setText(
+                "ACI 318-19 §22.5 (una dirección). Las losas no pueden llevar "
+                "refuerzo por cortante (§8.6.1); si falla, aumentar h o f'c."
+            )
+
+    def set_design_code(self, code: DesignCode):
+        if code == self.design_code:
+            return
+        self.design_code = code
+        self._apply_design_code()
+        self._emit_if_ready()
 
     def _connect_signals(self):
         for sb in [self.vu_spinbox, self.h_spinbox,

@@ -9,11 +9,14 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict
 
+from core.design_code import DEFAULT_CODE, DesignCode
 from core.units import UnitSystem
 
 
 FILE_FORMAT = "calculadora-acero"
-FILE_VERSION = 1
+# v1 → v2: se agregó la norma de diseño. Un archivo v1 se lee como ACI 318-19,
+# que era la única norma que existía cuando se escribió.
+FILE_VERSION = 2
 FILE_FILTER = "Estudio de acero (*.json);;Todos los archivos (*)"
 
 
@@ -31,10 +34,11 @@ class ProjectInfo:
 
 @dataclass
 class Study:
-    """Sesión completa: metadatos, unidades y estado de cada panel."""
+    """Sesión completa: metadatos, norma, unidades y estado de cada panel."""
     info: ProjectInfo = field(default_factory=ProjectInfo)
     unit_system: UnitSystem = UnitSystem.SI
     panels: Dict[str, dict] = field(default_factory=dict)
+    code: DesignCode = DEFAULT_CODE
 
 
 class StudyFileError(Exception):
@@ -46,6 +50,7 @@ def save_study(path, study: Study) -> None:
         "formato": FILE_FORMAT,
         "version": FILE_VERSION,
         "unidades": study.unit_system.name,
+        "norma": study.code.name,
         "cajetin": asdict(study.info),
         "paneles": study.panels,
     }
@@ -75,6 +80,12 @@ def load_study(path) -> Study:
     except KeyError:
         unit_system = UnitSystem.SI
 
+    # Los archivos v1 no traen norma: son de cuando sólo existía ACI 318-19.
+    try:
+        code = DesignCode[payload.get("norma", DEFAULT_CODE.name)]
+    except KeyError:
+        code = DEFAULT_CODE
+
     cajetin = payload.get("cajetin") or {}
     conocidos = {f for f in ProjectInfo.__dataclass_fields__}
     info = ProjectInfo(**{k: v for k, v in cajetin.items() if k in conocidos})
@@ -83,4 +94,5 @@ def load_study(path) -> Study:
         info=info,
         unit_system=unit_system,
         panels=payload.get("paneles") or {},
+        code=code,
     )
