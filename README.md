@@ -1,20 +1,43 @@
-# 🏗️ Beam Calculator (ACI 318-19)
+# 🏗️ Beam Calculator
 
-Aplicación de escritorio para diseñar acero de refuerzo por **flexión, cortante y torsión** según ACI 318-19. Compatible con Windows y Linux.
+Aplicación de escritorio para diseñar acero de refuerzo por **flexión, cortante y torsión**, con **dos normativas seleccionables**: **ACI 318-19** y **AASHTO LRFD Bridge Design Specifications 2020**. Compatible con Windows y Linux.
 
 ## ✨ Características
 
+- ✅ **Dos normativas** en la misma sección: se eligen desde la cabecera y la memoria registra con cuál se calculó
 - ✅ Diseño de vigas y losas por flexión
-- ✅ Diseño por cortante: estribos en viga y revisión de losa (ACI §22.5)
-- ✅ Diseño por torsión combinado con cortante en viga (ACI §22.7)
+- ✅ Diseño por cortante: estribos en viga y revisión de losa
+- ✅ Diseño por torsión combinado con cortante en viga
 - ✅ 3 sistemas de unidades: MKS (tonf, m), SI (kN, m), Inglés (kip, ft)
-- ✅ Cálculo de As requerido, As_min, As_max
+- ✅ Cálculo de As requerido, As_min y límites de armado
 - ✅ Sugerencias automáticas de varillas ASTM
-- ✅ Memoria de cálculo HTML imprimible, una por elemento, con fórmulas y referencias al ACI
+- ✅ Memoria de cálculo HTML imprimible, una por elemento, con las fórmulas y referencias de la norma usada
 - ✅ Guardar y reabrir el estudio completo en un archivo `.json`
 - ✅ Interfaz CLI (sin dependencias)
 - ✅ Interfaz GUI con PyQt6 (opcional)
 - ✅ Compatible con Linux y Windows
+
+> La interfaz CLI (`main_cli.py`) calcula sólo flexión según ACI 318-19. Para
+> AASHTO y para cortante y torsión, usar la GUI.
+
+## 📐 Normativas
+
+| | ACI 318-19 | AASHTO LRFD 2020 |
+|---|---|---|
+| φ flexión | 0.90 fijo | **Variable con ε_t** (§5.5.4.2): 0.75 → 0.90 |
+| φ cortante / torsión | 0.75 | **0.90** |
+| Refuerzo mínimo a flexión | Área (§9.6.1.2) | **Momento**: `M_r ≥ min(1.33·M_u, M_cr)` (§5.6.3.3) |
+| Peralte para cortante | `d` | **`d_v`** = max(d_e − a/2, 0.9·d_e, 0.72·h) (§5.7.2.8) |
+| V_c | Tabla 22.5.5.1 | `0.083·β·λ·√f'c·b_v·d_v`, β = 2.0 (§5.7.3.4.1) |
+| Umbral de torsión | `T_u > φ·T_th` | `T_u > 0.25·φ·T_cr` (§5.7.2.1) |
+| Revisiones extra | — | Refuerzo longitudinal (§5.7.3.5) y control de fisuración (§5.6.7) |
+
+**Alcance de AASHTO:** concreto reforzado, secciones rectangulares, con el
+**procedimiento simplificado de cortante** (§5.7.3.4.1). No están implementados
+el procedimiento general de §5.7.3.4.2 (MCFT), el preesfuerzo, ni los métodos
+específicos de tablero (§4.6.2.1, §9.7.2). El procedimiento simplificado sólo
+cubre elementos sin estribos si `h < 400 mm`; por encima, la aplicación avisa
+que el resultado no sirve como verificación normativa.
 
 ## 🚀 Uso rápido
 
@@ -116,10 +139,16 @@ Beam_calculator/
 ├── main_cli.py           # CLI (sin dependencias)
 │
 ├── core/
+│   ├── design_code.py   # Registro de normas y despacho al motor que toca
+│   ├── section_geometry.py  # Lechos, centroide y separaciones (común)
 │   ├── flexion.py       # Motor de flexión ACI 318-19
-│   ├── shear.py         # Motor de cortante (viga y losa)
-│   ├── torsion.py       # Motor de torsión + combinación V/T
-│   ├── report.py        # Memoria de cálculo HTML
+│   ├── shear.py         # Motor de cortante ACI (viga y losa)
+│   ├── torsion.py       # Motor de torsión ACI + combinación V/T
+│   ├── aashto/
+│   │   ├── flexion.py   # Motor de flexión AASHTO LRFD
+│   │   ├── shear.py     # Motor de cortante AASHTO (simplificado)
+│   │   └── torsion.py   # Motor de torsión AASHTO + combinación V/T
+│   ├── report.py        # Memoria de cálculo HTML (ambas normas)
 │   ├── project.py       # Estudio guardable (.json) y datos del cajetín
 │   ├── units.py         # Conversión de unidades
 │   ├── bar_tables.py    # Varillas ASTM
@@ -178,6 +207,34 @@ instalador `BeamCalculator-Setup-<version>.exe`.
 17. **Combinado:** (Av + 2At)/s ≥ max(0.062√f'c/fyt, 0.35/fyt)·bw
 18. **Al:** (At/s)·ph·(fyt/fy)·cot²θ, no menor que Al,min de §9.6.4.3
 19. **s máx torsión:** min(ph/8, 300 mm)
+
+## 🧮 Fórmulas AASHTO LRFD 2020
+
+### Flexión (§5.5.4.2, §5.6.2, §5.6.3, §5.6.7)
+
+1. **α₁, β₁:** β₁ igual que ACI; α₁ = 0.85 hasta 70 MPa, luego −0.02 por cada 7 MPa (piso 0.75)
+2. **ε_t:** ε_cu·(d_t − c)/c, con ε_cu = 0.003
+3. **φ:** 0.75 si ε_t ≤ ε_cl; 0.90 si ε_t ≥ ε_tl; interpolado en medio
+4. **f_r:** 0.62·λ·√f'c  ·  **M_cr:** γ₃·γ₁·f_r·S_c, con γ₁ = 1.6 y γ₃ = 0.67 (A615) o 0.75 (A706)
+5. **Refuerzo mínimo:** M_r ≥ min(1.33·M_u, M_cr) — criterio de momento, no de área
+6. **Control de fisuración:** s ≤ 123000·γ_e/(β_s·f_ss) − 2·d_c, con β_s = 1 + d_c/(0.7(h−d_c))
+
+### Cortante (§5.7.2, §5.7.3 — procedimiento simplificado de §5.7.3.4.1)
+
+7. **d_v:** max(d_e − a/2, 0.9·d_e, 0.72·h)
+8. **V_c:** 0.083·β·λ·√f'c·b_v·d_v, con β = 2.0 y φ = 0.90
+9. **V_s requerido:** V_u/φ − V_c  ·  **s:** A_v·f_y·d_v·cotθ / V_s, con θ = 45°
+10. **Tope de la sección:** V_n ≤ 0.25·f'c·b_v·d_v
+11. **(A_v/s)min:** 0.083·√f'c·b_v/f_y
+12. **s máx:** min(0.8·d_v, 600 mm) si v_u < 0.125·f'c; si no, min(0.4·d_v, 300 mm)
+13. **Refuerzo longitudinal:** A_s·f_y ≥ |M_u|/(φ_f·d_v) + (V_u/φ_v − 0.5·V_s)·cotθ
+
+### Torsión (§5.7.2.1, §5.7.3.6)
+
+14. **T_cr:** 0.125·λ·√f'c·(A_cp²/p_c) — se desprecia la torsión si T_u ≤ 0.25·φ·T_cr
+15. **Cortante equivalente:** V_u,eq = √[V_u² + (0.9·p_h·T_u/(2·A_o))²]
+16. **A_t/s:** (T_u/φ) / (2·A_o·f_y·cotθ), con A_o = 0.85·A_oh
+17. **Longitudinal combinado:** A_s·f_y ≥ |M_u|/(φ_f·d_v) + cotθ·√[(V_u/φ_v − 0.5·V_s)² + (0.45·p_h·T_u/(2·A_o·φ))²]
 
 ## 🔧 Solución de problemas
 

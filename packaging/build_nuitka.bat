@@ -67,7 +67,7 @@ python -m nuitka main.py ^
     --product-name="Beam Calculator" ^
     --file-version=%VERSION%.0 ^
     --product-version=%VERSION%.0 ^
-    --file-description="Beam Calculator - Diseno de refuerzo ACI 318-19" ^
+    --file-description="Beam Calculator - Diseno de refuerzo ACI 318-19 y AASHTO LRFD" ^
     --zig ^
     --assume-yes-for-downloads ^
     --remove-output ^

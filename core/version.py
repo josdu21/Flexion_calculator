@@ -13,7 +13,7 @@ no ejecutan Python. `packaging/bump_version.py` actualiza ambos a la vez y
 """
 
 APP_NAME = "Beam Calculator"
-APP_TAGLINE = "Diseño de refuerzo según ACI 318-19"
+APP_TAGLINE = "Diseño de refuerzo — ACI 318-19 y AASHTO LRFD 2020"
 PUBLISHER = "Jose Manuel Duarte"
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
