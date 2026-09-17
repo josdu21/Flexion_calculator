@@ -1,9 +1,30 @@
-"""Contenedores de lectura continua y detalles bajo demanda."""
+"""Contenedores de lectura continua, detalles bajo demanda y carga de estado."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QScrollArea, QFrame, QPushButton, QVBoxLayout, QWidget,
     QBoxLayout, QLayout, QSizePolicy,
 )
+
+
+def set_si(spinbox, si_value, to_user_factor) -> None:
+    """Escribe en el spinbox un valor guardado en SI, en la unidad del usuario.
+
+    Los valores fuera del rango del control se recortan en vez de descartarse,
+    para que abrir un estudio nunca falle silenciosamente.
+    """
+    if spinbox is None or si_value is None:
+        return
+    value = si_value / to_user_factor if to_user_factor else si_value
+    spinbox.setValue(max(spinbox.minimum(), min(spinbox.maximum(), value)))
+
+
+def set_choice(combo, data) -> None:
+    """Selecciona en el combo el ítem cuyo userData coincide; si no está, no toca."""
+    if combo is None or data is None:
+        return
+    index = combo.findData(data)
+    if index >= 0:
+        combo.setCurrentIndex(index)
 
 
 def scroll_form(*groups) -> QScrollArea:

@@ -204,6 +204,7 @@ class BeamShearTorsionDesign:
         stirrup_legs: int = 2,
         db_long_assumed_mm: float = 19.05,
         lam: float = 1.0,
+        d_mm: float = 0.0,
         # --- torsión ---
         torsion_enabled: bool = False,
         tu_nmm: float = 0.0,
@@ -221,6 +222,7 @@ class BeamShearTorsionDesign:
         self.stirrup_legs = max(2, int(stirrup_legs))
         self.db_long_assumed_mm = db_long_assumed_mm
         self.lam = lam
+        self.d_mm = d_mm
         self.torsion_enabled = torsion_enabled
         self.tu_nmm = max(tu_nmm, 0.0)
         self.fy_long_mpa = fy_long_mpa
@@ -241,6 +243,7 @@ class BeamShearTorsionDesign:
             stirrup_legs=self.stirrup_legs,
             db_long_assumed_mm=self.db_long_assumed_mm,
             lam=self.lam,
+            d_mm=self.d_mm,
         ).design()
 
     def _section_properties(self):
@@ -368,7 +371,9 @@ class BeamShearTorsionDesign:
         #     A_b/s ≥ A_t/s + (A_v/s)/n
         per_leg_demand = at_s + av_s / n
         s_comb = ab / per_leg_demand if per_leg_demand > 0 else float("inf")
-        s_min_req = (n * ab) / avt_s_min if avt_s_min > 0 else float("inf")
+        # Con el estribo cerrado: A_v = n·A_b y A_t = A_b (una rama), así que
+        # el mínimo de §9.6.4.2 se cubre con (A_v + 2A_t)/s = (n + 2)·A_b/s.
+        s_min_req = ((n + 2) * ab) / avt_s_min if avt_s_min > 0 else float("inf")
         s_tor_max = min(ph / 8.0, S_MAX_TORSION_MM)
         s_max = min(shear.s_max_mm, s_tor_max)
 
@@ -381,7 +386,7 @@ class BeamShearTorsionDesign:
         phi_vn = PHI_SHEAR * (vc_n + vs_prov)
         tn_prov = 2.0 * ao * ab * fyt * cot / s_adopted      # A_t = una rama
         phi_tn = PHI_TORSION * tn_prov
-        avt_s_prov = n * ab / s_adopted
+        avt_s_prov = (n + 2) * ab / s_adopted                # (A_v + 2A_t)/s
 
         # --- Refuerzo longitudinal por torsión (§22.7.6.1b) ---
         al_req = at_s * ph * (fyt / fy_l) * cot ** 2
@@ -431,7 +436,7 @@ class BeamShearTorsionDesign:
             stress_limit_mpa=stress_limit,
             section_ratio=(
                 (stress_limit / stress_demand) if stress_demand > 0 else float("inf")
-            ),
+            ),  # inf = sin solicitación; el consumidor decide cómo mostrarlo
             section_ok=section_ok,
             av_s_required=av_s,
             at_s_required=at_s,
@@ -446,6 +451,6 @@ class BeamShearTorsionDesign:
             long_bars=long_bars,
             tn_provided_knm=tn_prov / 1e6,
             phi_tn_knm=phi_tn / 1e6,
-            torsion_ratio=torsion_ratio if math.isfinite(torsion_ratio) else 0.0,
+            torsion_ratio=torsion_ratio,
             torsion_warnings=warns,
         )

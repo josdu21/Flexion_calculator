@@ -1,8 +1,8 @@
 #!/bin/bash
-# Script de instalación de la Calculadora de Acero por Flexión
+# Script de instalación de la Beam Calculator
 
 echo "=========================================="
-echo "Calculadora de Acero por Flexión"
+echo "Beam Calculator"
 echo "Instalador"
 echo "=========================================="
 echo ""
@@ -33,5 +33,5 @@ echo "Para ejecutar la aplicación:"
 echo "  ./ejecutar.sh          (desde el directorio)"
 echo "  python main_cli.py     (versión CLI sin dependencias)"
 echo ""
-echo "O busca 'Calculadora de Acero' en tu menú de aplicaciones"
+echo "O busca 'Beam Calculator' en tu menú de aplicaciones"
 echo ""

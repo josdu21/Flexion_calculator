@@ -232,9 +232,11 @@ class BeamSection:
         beta_1 = self._calculate_beta_1()
 
         # 3) Demanda
-        rn = self.mu_nmm / (self.phi * self.b_mm * d_mm * d_mm)
-        m = self.fy_mpa / (0.85 * self.fc_mpa)
-        discriminant = 1.0 - 2.0 * m * rn / self.fy_mpa
+        rn = (self.mu_nmm / (self.phi * self.b_mm * d_mm * d_mm)
+              if self.b_mm > 0 else 0.0)
+        m = self.fy_mpa / (0.85 * self.fc_mpa) if self.fc_mpa > 0 else 0.0
+        discriminant = (1.0 - 2.0 * m * rn / self.fy_mpa
+                        if self.fy_mpa > 0 and m > 0 else 0.0)
 
         if validation_error:
             status = "ERROR"
@@ -252,18 +254,23 @@ class BeamSection:
             status = "OK"
 
         # 4) As mínimo (ACI 318-19 §9.6.1.2)
-        term1 = (0.25 * math.sqrt(self.fc_mpa) / self.fy_mpa) * self.b_mm * d_mm / 100.0
-        term2 = (1.4 / self.fy_mpa) * self.b_mm * d_mm / 100.0
+        if self.fy_mpa > 0 and self.fc_mpa > 0:
+            term1 = (0.25 * math.sqrt(self.fc_mpa) / self.fy_mpa) * self.b_mm * d_mm / 100.0
+            term2 = (1.4 / self.fy_mpa) * self.b_mm * d_mm / 100.0
+        else:
+            term1 = term2 = 0.0
         as_min_cm2 = max(term1, term2)
 
         # 5) As máximo
-        rho_max = (0.85 * beta_1 * self.fc_mpa / self.fy_mpa) * (0.003 / (0.003 + 0.004))
+        rho_max = ((0.85 * beta_1 * self.fc_mpa / self.fy_mpa) * (0.003 / (0.003 + 0.004))
+                   if self.fy_mpa > 0 else 0.0)
         as_max_cm2 = rho_max * self.b_mm * d_mm / 100.0
 
         # 6) As proporcionado (lo que el usuario eligió)
         as_provided_cm2 = self.reinforcement.total_area_cm2
         as_provided_mm2 = as_provided_cm2 * 100.0
-        rho_provided = as_provided_mm2 / (self.b_mm * d_mm) if d_mm > 0 else 0.0
+        rho_provided = (as_provided_mm2 / (self.b_mm * d_mm)
+                        if d_mm > 0 and self.b_mm > 0 else 0.0)
 
         # 7) Verificaciones de armado
         as_demand_cm2 = max(as_required_cm2, as_min_cm2)
@@ -282,8 +289,8 @@ class BeamSection:
             )
 
         # 8) Bloque de Whitney basado en As proporcionado
-        a_mm = (as_provided_mm2 * self.fy_mpa) / (0.85 * self.fc_mpa * self.b_mm) \
-            if self.b_mm > 0 else 0.0
+        a_mm = ((as_provided_mm2 * self.fy_mpa) / (0.85 * self.fc_mpa * self.b_mm)
+                if self.b_mm > 0 and self.fc_mpa > 0 else 0.0)
         c_mm = a_mm / beta_1 if beta_1 > 0 else 0.0
         jd_mm = d_mm - a_mm / 2.0
 

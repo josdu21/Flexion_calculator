@@ -1,9 +1,9 @@
 #!/bin/bash
-# Calculadora de Acero por Flexión - Script de ejecución robusto
+# Beam Calculator - Script de ejecución robusto
 
-# Obtener el directorio del script
+# main.py vive en la raiz del proyecto, un nivel arriba de packaging/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || exit 1
+cd "$SCRIPT_DIR/.." || exit 1
 
 # Detectar si se ejecuta desde GUI o terminal
 if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
@@ -37,7 +37,7 @@ run_with_check() {
         else
             # Desde terminal: mostrar opciones
             echo "=================================================="
-            echo "Calculadora de Acero por Flexión"
+            echo "Beam Calculator"
             echo "=================================================="
             echo ""
             echo "PyQt6 no está instalado."

@@ -1,18 +1,23 @@
 """Generador de memoria de cálculo HTML + LaTeX (MathJax).
 
-Produce un documento autocontenido con:
-- Encabezado y metadatos
-- Datos de entrada (geometría, materiales, refuerzo)
-- Cálculos paso a paso con fórmulas LaTeX
-- Referencias al ACI 318-19
-- Verificaciones de armado y separación
-- Estilos optimizados para imprimir (fondo blanco, márgenes A4)
+Hay una memoria por elemento, no por análisis:
+
+- :func:`generate_beam_report`  → viga: flexión, cortante y torsión.
+- :func:`generate_slab_report`  → losa: flexión y cortante.
+
+Cada documento es autocontenido (datos de entrada unificados, cálculos paso a
+paso con referencias al ACI 318-19, advertencias y un resumen global) y está
+estilizado para imprimir en A4. Los ``_*_fragments`` arman cada parte y reciben
+el número de sección que les toca dentro del documento final.
 """
 import math
 from datetime import datetime
+from html import escape
 from typing import Optional
 
-from core.flexion import FlexionDesignResult, BeamSection, ReinforcementConfig
+from core.flexion import FlexionDesignResult
+from core.project import ProjectInfo
+from core.version import APP_NAME, __version__
 from core.bar_tables import REBAR_SIZES
 from core.units import UnitSystem, get_converter
 from core.shear import BeamShearResult, SlabShearResult
@@ -31,32 +36,29 @@ def _fmt_layer(layer, cv) -> str:
     return f"{layer.n_bars} × {_bar_label(layer.bar_diameter_mm)}"
 
 
-def generate_html_report(
+def _flexion_fragments(
     result: FlexionDesignResult,
-    inputs_user: dict,
     unit_system: UnitSystem,
     section_type: str = "Viga",
-    project_name: str = "Proyecto sin título",
-    element_name: str = "Elemento sin nombre",
-    designer: str = "",
-) -> str:
-    """Genera el HTML completo de la memoria de cálculo.
+    extra_load_rows: str = "",
+    extra_material_rows: str = "",
+    extra_input_blocks: str = "",
+) -> dict:
+    """Fragmentos HTML de la parte de flexión de la memoria.
 
-    inputs_user: dict con valores en la unidad del usuario (mu, b, h, cover, fc, fy)
+    Devuelve las claves ``inputs`` (sección 1) y ``calc`` (secciones 2 y 3),
+    más los datos que la memoria unificada necesita para el resumen final.
+    Las secciones de cortante y torsión se numeran a continuación.
     """
     cv = get_converter(unit_system)
     reinf = result.reinforcement
-    is_slab = section_type.lower().startswith("losa")
 
     # Helpers de formato
     L = lambda mm, d=1: cv.format_length_small(mm, d)        # cm/in
-    Lbig = lambda mm, d=2: cv.format_length(mm, d)            # m/ft (no usado mucho)
     A = lambda cm2, d=2: cv.format_area(cm2, d)
     M = lambda knm, d=2: f"{knm / cv.moment_to_knm:.{d}f} {cv.moment_unit}"
-    F = lambda kn, d=2: f"{kn:.{d}f} kN"
     S = lambda mpa, d=1: f"{mpa / cv.stress_to_mpa:.{d}f} {cv.stress_unit}"
 
-    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
     status_class = {
         "OK": "ok",
         "ARMADO INSUFICIENTE": "fail",
@@ -164,320 +166,8 @@ def generate_html_report(
     sep_v_class = "ok" if result.vertical_spacing_ok else "fail"
     sep_v_applies = result.vertical_spacing_mm > 0
 
-    # Solo mostrar sección de estribo si es viga
-    stirrup_section = ""
-    if not is_slab and reinf:
-        stirrup_section = f"""
-                <tr>
-                    <td>Diámetro del estribo</td>
-                    <td>{_bar_label(reinf.stirrup_diameter_mm)}</td>
-                    <td>{reinf.stirrup_diameter_mm:.2f} mm</td>
-                </tr>"""
-
-    return f"""<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<title>Memoria de Cálculo — {element_name}</title>
-<script>
-window.MathJax = {{
-  tex: {{
-    inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-    displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
-    processEscapes: true,
-    tags: 'ams'
-  }},
-  svg: {{ fontCache: 'global' }}
-}};
-</script>
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-<style>
-@page {{
-  size: A4;
-  margin: 2cm 2cm 2.5cm 2.5cm;
-}}
-
-* {{
-  box-sizing: border-box;
-}}
-
-body {{
-  font-family: 'Cambria', 'Georgia', 'Times New Roman', serif;
-  font-size: 11pt;
-  line-height: 1.5;
-  color: #000;
-  background: #fff;
-  margin: 0;
-  padding: 0;
-}}
-
-.page {{
-  max-width: 21cm;
-  margin: 0 auto;
-  padding: 2.5cm 2cm;
-  background: #fff;
-}}
-
-/* Header */
-.doc-header {{
-  text-align: center;
-  border-bottom: 3px double #000;
-  padding-bottom: 12px;
-  margin-bottom: 24px;
-}}
-
-.doc-header h1 {{
-  font-size: 18pt;
-  margin: 0 0 4px 0;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-}}
-
-.doc-header .subtitle {{
-  font-size: 11pt;
-  font-style: italic;
-  color: #444;
-  margin: 0;
-}}
-
-.metadata {{
-  display: grid;
-  grid-template-columns: max-content 1fr max-content 1fr;
-  gap: 4px 12px;
-  font-size: 10pt;
-  margin-bottom: 24px;
-  padding: 8px 12px;
-  border: 1px solid #999;
-  background: #f5f5f5;
-}}
-
-.metadata .label {{
-  font-weight: bold;
-}}
-
-/* Headings */
-h2 {{
-  font-size: 14pt;
-  margin: 24px 0 10px 0;
-  padding-bottom: 4px;
-  border-bottom: 2px solid #333;
-  page-break-after: avoid;
-}}
-
-h3 {{
-  font-size: 12pt;
-  margin: 16px 0 6px 0;
-  color: #222;
-  page-break-after: avoid;
-}}
-
-h4 {{
-  font-size: 11pt;
-  font-style: italic;
-  margin: 10px 0 4px 0;
-  color: #333;
-  page-break-after: avoid;
-}}
-
-p {{
-  margin: 6px 0;
-  text-align: justify;
-}}
-
-/* Reference badges */
-.aci-ref {{
-  display: inline-block;
-  font-size: 9pt;
-  font-style: italic;
-  color: #555;
-  background: #eef;
-  padding: 1px 6px;
-  border-left: 3px solid #336;
-  margin-left: 6px;
-}}
-
-/* Step containers */
-.step {{
-  margin: 12px 0;
-  padding: 8px 12px;
-  border-left: 3px solid #ccc;
-  background: #fafafa;
-  page-break-inside: avoid;
-}}
-
-.step .step-title {{
-  font-weight: bold;
-  color: #333;
-  margin-bottom: 4px;
-}}
-
-/* Tables */
-table.data {{
-  width: 100%;
-  border-collapse: collapse;
-  margin: 10px 0;
-  font-size: 10.5pt;
-}}
-
-table.data th, table.data td {{
-  border: 1px solid #888;
-  padding: 5px 8px;
-  text-align: left;
-}}
-
-table.data th {{
-  background: #ddd;
-  font-weight: bold;
-}}
-
-table.data td.num {{
-  text-align: right;
-  font-family: 'Cambria Math', 'Consolas', monospace;
-}}
-
-table.data tr:nth-child(even) td {{
-  background: #f7f7f7;
-}}
-
-/* Result summary */
-.result-summary {{
-  margin: 20px 0;
-  padding: 14px;
-  border: 2px solid;
-  page-break-inside: avoid;
-}}
-
-.result-summary.ok {{
-  border-color: #0a6;
-  background: #f0fff4;
-}}
-
-.result-summary.fail {{
-  border-color: #c00;
-  background: #fff0f0;
-}}
-
-.result-summary.warn {{
-  border-color: #c70;
-  background: #fffaf0;
-}}
-
-.result-summary h3 {{
-  margin: 0 0 8px 0;
-  font-size: 13pt;
-}}
-
-.result-summary.ok h3::before {{ content: "✓ "; }}
-.result-summary.fail h3::before {{ content: "✗ "; }}
-.result-summary.warn h3::before {{ content: "⚠ "; }}
-
-/* Alerts */
-.alert {{
-  margin: 16px 0;
-  padding: 10px 14px;
-  border-left: 4px solid;
-}}
-
-.alert-warn {{
-  background: #fff8e1;
-  border-color: #c70;
-}}
-
-.alert-warn h3 {{
-  margin-top: 0;
-  color: #850;
-}}
-
-/* Status chips inside table */
-.chip {{
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-size: 9pt;
-  font-weight: bold;
-}}
-.chip.ok    {{ background: #d4edda; color: #155724; border: 1px solid #28a745; }}
-.chip.fail  {{ background: #f8d7da; color: #721c24; border: 1px solid #dc3545; }}
-
-/* Footer */
-.doc-footer {{
-  margin-top: 40px;
-  padding-top: 8px;
-  border-top: 1px solid #888;
-  font-size: 9pt;
-  color: #555;
-  text-align: center;
-}}
-
-/* Print: hide controls, fit nicely */
-.print-bar {{
-  position: sticky;
-  top: 0;
-  background: #2c3e50;
-  color: #fff;
-  padding: 8px 16px;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  z-index: 100;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-}}
-
-.print-bar button {{
-  background: #3498db;
-  color: #fff;
-  border: none;
-  padding: 6px 14px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 10pt;
-}}
-
-.print-bar button:hover {{
-  background: #5dade2;
-}}
-
-@media print {{
-  .print-bar {{ display: none; }}
-  body {{ background: #fff; }}
-  .page {{ box-shadow: none; padding: 0; }}
-  .step {{ background: transparent; }}
-}}
-
-@media screen {{
-  body {{ background: #e8e8e8; padding: 0; }}
-  .page {{
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-    margin-top: 20px;
-    margin-bottom: 20px;
-  }}
-}}
-</style>
-</head>
-<body>
-
-<div class="print-bar">
-  <strong>📄 Memoria de Cálculo</strong>
-  <button onclick="window.print()">🖨 Imprimir / Guardar PDF</button>
-  <span style="margin-left:auto; font-size:10pt;">{element_name}</span>
-</div>
-
-<div class="page">
-
-<div class="doc-header">
-  <h1>Memoria de Cálculo</h1>
-  <p class="subtitle">Diseño por flexión según ACI 318-19</p>
-</div>
-
-<div class="metadata">
-  <span class="label">Proyecto:</span><span>{project_name}</span>
-  <span class="label">Fecha:</span><span>{fecha}</span>
-  <span class="label">Elemento:</span><span>{element_name}</span>
-  <span class="label">Tipo:</span><span>{section_type}</span>
-  <span class="label">Diseñador:</span><span>{designer or "—"}</span>
-  <span class="label">Norma:</span><span>ACI 318-19</span>
-</div>
-
+    return {
+        "inputs": f"""
 <!-- ============ 1. DATOS DE ENTRADA ============ -->
 <h2>1. Datos de entrada</h2>
 
@@ -488,6 +178,7 @@ table.data tr:nth-child(even) td {{
     <td>$M_u$</td>
     <td class="num">{M(result.mu_demand_knm)}</td>
   </tr>
+  {extra_load_rows}
 </table>
 
 <h3>1.2 Geometría</h3>
@@ -521,6 +212,7 @@ table.data tr:nth-child(even) td {{
     <td>$f_y$</td>
     <td class="num">{S(fy)}</td>
   </tr>
+  {extra_material_rows}
 </table>
 
 <h3>1.4 Refuerzo propuesto</h3>
@@ -536,13 +228,11 @@ table.data tr:nth-child(even) td {{
   </tr>
 </table>
 
-{('<table class="data"><tr><td>Diámetro del estribo</td><td>' +
-  _bar_label(reinf.stirrup_diameter_mm) +
-  f'</td><td class="num">{reinf.stirrup_diameter_mm:.2f} mm</td></tr></table>')
-  if (not is_slab and reinf) else ''}
-
+{extra_input_blocks}
+""",
+        "calc": f"""
 <!-- ============ 2. CÁLCULOS ============ -->
-<h2>2. Cálculos de diseño</h2>
+<h2>2. Cálculos de diseño (flexión)</h2>
 
 <h3>2.1 Factor de reducción $\\beta_1$
   <span class="aci-ref">ACI 318-19 §22.2.2.4.3</span>
@@ -650,7 +340,7 @@ controlada por tracción:</p>
   $$T = A_s \\cdot f_y = {as_prov_mm2:.1f} \\cdot {fy:.1f} =
     {t_force*1000:.0f}\\;\\text{{N}} = {t_force:.2f}\\;\\text{{kN}}$$
 </div>
-<p>Verificación de equilibrio: $C \\approx T$ ⇒ <b>{abs(c_force - t_force) < 0.5}</b></p>
+<p>Verificación de equilibrio: $C \\approx T$ &nbsp;<span class="chip {'ok' if abs(c_force - t_force) < 0.5 else 'fail'}">{'CUMPLE' if abs(c_force - t_force) < 0.5 else 'NO CUMPLE'}</span></p>
 
 <h3>2.8 Momento resistente nominal y reducido</h3>
 <div class="step">
@@ -662,7 +352,7 @@ controlada por tracción:</p>
 </div>
 
 <!-- ============ 3. VERIFICACIONES ============ -->
-<h2>3. Verificaciones</h2>
+<h2>3. Verificaciones (flexión)</h2>
 
 <h3>3.1 Capacidad vs Demanda</h3>
 <table class="data">
@@ -744,52 +434,19 @@ $$s_{{min}} = \\max(d_b,\\; 25\\,\\text{{mm}})$$
     <td>{('<span class="chip ' + sep_v_class + '">' + sep_v_status + '</span>') if sep_v_applies else '<i>no aplica</i>'}</td>
   </tr>
 </table>
-
-{warnings_html}
-
-<!-- ============ 4. RESUMEN ============ -->
-<h2>4. Resumen del diseño</h2>
-
-<div class="result-summary {status_class}">
-  <h3>Estado: {result.status}</h3>
-  <table class="data" style="margin-top: 8px;">
-    <tr>
-      <td>Tipo</td><td><b>{section_type}</b></td>
-      <td>$d$ efectivo</td><td class="num">{L(d, 2)}</td>
-    </tr>
-    <tr>
-      <td>Sección</td><td>${L(b, 1)} \\times {L(h, 1)}$</td>
-      <td>$\\phi M_n$</td><td class="num"><b>{M(phi_mn)}</b></td>
-    </tr>
-    <tr>
-      <td>Refuerzo</td><td><b>{layers_summary}</b></td>
-      <td>$M_u$</td><td class="num">{M(result.mu_demand_knm)}</td>
-    </tr>
-    <tr>
-      <td>$A_s$ total</td><td><b>{A(as_prov)}</b></td>
-      <td>$\\phi M_n / M_u$</td>
-      <td class="num"><b>{ratio:.3f}</b></td>
-    </tr>
-  </table>
-</div>
-
-<div class="doc-footer">
-  <p>Memoria de cálculo generada por <b>Calculadora de Acero por Flexión</b> —
-  Diseño conforme a ACI 318-19 — {fecha}</p>
-</div>
-
-</div>
-
-</body>
-</html>
-"""
+""",
+        "warnings": warnings_html,
+        "ratio": ratio,
+        "status_class": status_class,
+        "layers_summary": layers_summary,
+    }
 
 
 # ============================================================
-#         Memoria de cálculo por CORTANTE (ACI 318-19)
+#         Plantilla y estilos comunes a todas las memorias
 # ============================================================
 
-_SHEAR_CSS = """
+_REPORT_CSS = """
 @page { size: A4; margin: 2cm 2cm 2.5cm 2.5cm; }
 * { box-sizing: border-box; }
 body { font-family: 'Cambria', 'Georgia', 'Times New Roman', serif;
@@ -805,6 +462,8 @@ body { font-family: 'Cambria', 'Georgia', 'Times New Roman', serif;
             gap: 4px 12px; font-size: 10pt; margin-bottom: 24px; padding: 8px 12px;
             border: 1px solid #999; background: #f5f5f5; }
 .metadata .label { font-weight: bold; }
+.doc-notes { font-size: 10pt; margin: -16px 0 24px 0; padding: 8px 12px;
+             border: 1px solid #999; border-top: none; background: #fcfcfc; }
 h2 { font-size: 14pt; margin: 24px 0 10px 0; padding-bottom: 4px;
      border-bottom: 2px solid #333; page-break-after: avoid; }
 h3 { font-size: 12pt; margin: 16px 0 6px 0; color: #222; page-break-after: avoid; }
@@ -851,10 +510,10 @@ table.data tr:nth-child(even) td { background: #f7f7f7; }
 """
 
 
-def _shear_envelope(
+def _document(
     body_inner: str, title: str, element_name: str, kind: str = "Cortante"
 ) -> str:
-    """Plantilla HTML+MathJax común a las memorias de cortante y torsión."""
+    """Plantilla HTML+MathJax común a todas las memorias."""
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -871,7 +530,7 @@ window.MathJax = {{
 }};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-<style>{_SHEAR_CSS}</style>
+<style>{_REPORT_CSS}</style>
 </head>
 <body>
 <div class="print-bar">
@@ -887,8 +546,8 @@ window.MathJax = {{
 """
 
 
-def _torsion_report_block(t: BeamShearTorsionResult, L, F, S, M, A) -> str:
-    """Sección 3 de la memoria: cálculos de torsión y combinación V + T."""
+def _torsion_report_block(t: BeamShearTorsionResult, L, F, S, M, A, sec: int = 3) -> str:
+    """Sección de la memoria: cálculos de torsión y combinación V + T."""
     fc = t.fc_mpa
     fyt = t.fyt_mpa
     fy_l = t.fy_long_mpa
@@ -897,9 +556,9 @@ def _torsion_report_block(t: BeamShearTorsionResult, L, F, S, M, A) -> str:
     tcr_nmm = t.t_cr_knm * 1e6
 
     header = f"""
-<h2>3. Cálculos de diseño (torsión)</h2>
+<h2>{sec}. Cálculos de diseño (torsión)</h2>
 
-<h3>3.1 Torsión umbral $T_{{th}}$
+<h3>{sec}.1 Torsión umbral $T_{{th}}$
   <span class="aci-ref">ACI 318-19 §22.7.4.1</span>
 </h3>
 <p>Por debajo del umbral se permite despreciar los efectos de torsión:</p>
@@ -965,7 +624,7 @@ $d_b \\ge \\max(0.042\\,s,\\,\\#3)$, al menos una barra en cada esquina):</p>
 """
 
     return header + f"""
-<h3>3.2 Tipo de torsión y torsor de diseño
+<h3>{sec}.2 Tipo de torsión y torsor de diseño
   <span class="aci-ref">ACI 318-19 §22.7.3 / §22.7.5.1</span>
 </h3>
 <p>Tipo declarado: <b>{tipo_txt}</b>.</p>
@@ -982,7 +641,7 @@ $d_b \\ge \\max(0.042\\,s,\\,\\#3)$, al menos una barra en cada esquina):</p>
       <td class="num"><b>{M(t.tu_design_knm)}</b></td></tr>
 </table>
 
-<h3>3.3 Límite de dimensiones de la sección
+<h3>{sec}.3 Límite de dimensiones de la sección
   <span class="aci-ref">ACI 318-19 §22.7.7.1</span>
 </h3>
 <p>Se limita el esfuerzo combinado de cortante y torsión para controlar el
@@ -1006,7 +665,7 @@ aplastamiento del concreto:</p>
       {'CUMPLE' if sec_ok else 'NO CUMPLE — AUMENTAR SECCIÓN'}</span></td></tr>
 </table>
 
-<h3>3.4 Refuerzo transversal por torsión
+<h3>{sec}.4 Refuerzo transversal por torsión
   <span class="aci-ref">ACI 318-19 §22.7.6.1a</span>
 </h3>
 <div class="step">
@@ -1019,7 +678,7 @@ aplastamiento del concreto:</p>
 </div>
 <p>$A_t$ corresponde a <b>una rama</b> del estribo cerrado más exterior.</p>
 
-<h3>3.5 Refuerzo transversal combinado $V + T$
+<h3>{sec}.5 Refuerzo transversal combinado $V + T$
   <span class="aci-ref">ACI 318-19 §9.6.4.2 / §9.7.6.3.3</span>
 </h3>
 <div class="step">
@@ -1055,7 +714,7 @@ se obtiene entonces exigiendo, por rama exterior:</p>
       <td class="num">{t.avt_s_provided:.4f} mm²/mm</td></tr>
 </table>
 
-<h3>3.6 Refuerzo longitudinal por torsión
+<h3>{sec}.6 Refuerzo longitudinal por torsión
   <span class="aci-ref">ACI 318-19 §22.7.6.1b / §9.6.4.3</span>
 </h3>
 <div class="step">
@@ -1083,21 +742,21 @@ se obtiene entonces exigiendo, por rama exterior:</p>
 """
 
 
-def generate_shear_torsion_beam_html_report(
+def _beam_shear_fragments(
     result: BeamShearResult,
     unit_system: UnitSystem,
-    project_name: str = "Proyecto sin título",
-    element_name: str = "Viga V-1",
-    designer: str = "",
-) -> str:
-    """Memoria de cálculo de cortante (y torsión, si aplica) en viga.
+    si: int = 1,
+    sc: int = 4,
+    st: int = 5,
+) -> dict:
+    """Fragmentos de la parte de cortante (y torsión) de la memoria de viga.
 
     Acepta tanto un :class:`~core.shear.BeamShearResult` como el resultado
-    combinado :class:`~core.torsion.BeamShearTorsionResult`; las secciones de
-    torsión sólo aparecen cuando ésta se incluyó en el diseño.
+    combinado :class:`~core.torsion.BeamShearTorsionResult`; los fragmentos de
+    torsión salen vacíos cuando ésta no se incluyó en el diseño. ``si``, ``sc``
+    y ``st`` son los números de sección de datos de entrada, cortante y torsión.
     """
     cv = get_converter(unit_system)
-    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     L = lambda mm, d=1: cv.format_length_small(mm, d)
     F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
@@ -1147,18 +806,10 @@ def generate_shear_torsion_beam_html_report(
     cap_text = "CUMPLE" if (cap_ratio == float("inf") or cap_ratio >= 1.0) else "NO CUMPLE"
     cap_ratio_str = "∞" if cap_ratio == float("inf") else f"{cap_ratio:.3f}"
 
-    warnings_html = ""
-    if result.warnings:
-        warnings_html = (
-            '<div class="alert alert-warn"><h3>⚠ Advertencias</h3><ul>'
-            + "".join(f"<li>{w}</li>" for w in result.warnings)
-            + "</ul></div>"
-        )
-
     # Bloque de cálculo de Vs / s
     if result.regime == "DISEÑO":
         vs_block = f"""
-<h3>2.4 Cortante requerido del refuerzo $V_s$
+<h3>{sc}.4 Cortante requerido del refuerzo $V_s$
   <span class="aci-ref">ACI 318-19 §22.5.1.1</span>
 </h3>
 <div class="step">
@@ -1172,7 +823,7 @@ $V_s \\le 0.66\\sqrt{{f'_c}}\\,b_w d = {vs_lim_n:.0f}\\;\\text{{N}} = {F(result.
 &nbsp;<span class="chip {'ok' if vs_req_n <= vs_lim_n else 'fail'}">
 {'CUMPLE' if vs_req_n <= vs_lim_n else 'EXCEDE'}</span></p>
 
-<h3>2.5 Separación por resistencia</h3>
+<h3>{sc}.5 Separación por resistencia</h3>
 <div class="step">
   <div class="step-title">$s$ requerido</div>
   $$\\left(\\dfrac{{A_v}}{{s}}\\right)_{{req}} = \\dfrac{{V_s}}{{f_{{yt}}\\,d}}
@@ -1182,21 +833,21 @@ $V_s \\le 0.66\\sqrt{{f'_c}}\\,b_w d = {vs_lim_n:.0f}\\;\\text{{N}} = {F(result.
 </div>
 """
     elif result.regime == "MINIMO":
-        vs_block = """
-<h3>2.4 Régimen</h3>
+        vs_block = f"""
+<h3>{sc}.4 Régimen</h3>
 <p>$0.5 \\phi V_c < V_u \\le \\phi V_c$ — no se requiere Vs por resistencia; se
 adopta el armado mínimo por cortante.</p>
 """
     elif result.regime == "TORSION":
-        vs_block = """
-<h3>2.4 Régimen</h3>
+        vs_block = f"""
+<h3>{sc}.4 Régimen</h3>
 <p>$V_u \\le 0.5 \\phi V_c$ — el cortante por sí solo no exigiría estribos, pero
 la torsión sí los requiere. La separación adoptada proviene de la combinación
-$V + T$ de la sección 3.</p>
+$V + T$ de la sección {st}.</p>
 """
     else:
-        vs_block = """
-<h3>2.4 Régimen</h3>
+        vs_block = f"""
+<h3>{sc}.4 Régimen</h3>
 <p>$V_u \\le 0.5 \\phi V_c$ — la viga no requiere refuerzo por cortante. Aun así
 es recomendable disponer estribos mínimos por consideraciones constructivas.</p>
 """
@@ -1223,8 +874,6 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
     torsion_block = ""
     torsion_result_rows = ""
     torsion_summary_rows = ""
-    sec_result = "3"
-    sec_summary = "4"
 
     if torsion is not None:
         t = torsion
@@ -1243,7 +892,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
             f'<td class="num">{S(t.fy_long_mpa)}</td></tr>'
         )
         section_props_block = f"""
-<h3>1.5 Propiedades de la sección para torsión</h3>
+<h3>{si}.6 Propiedades de la sección para torsión</h3>
 <table class="data">
   <tr><td>Área encerrada por el perímetro exterior</td><td>$A_{{cp}} = b\\,h$</td>
       <td class="num">{t.acp_mm2:,.0f} mm²</td></tr>
@@ -1259,9 +908,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
       <td class="num">{t.theta_deg:.0f}°</td></tr>
 </table>
 """
-        torsion_block = _torsion_report_block(t, L, F, S, M, A)
-        sec_result = "4"
-        sec_summary = "5"
+        torsion_block = _torsion_report_block(t, L, F, S, M, A, sec=st)
 
         if tor_design:
             tor_ok = t.torsion_ratio >= 1.0
@@ -1297,55 +944,28 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
         (ACI 22.7.4.1) — no requiere refuerzo por torsión.</td></tr>
 """
 
-    body = f"""
-<div class="doc-header">
-  <h1>Memoria de Cálculo</h1>
-  <p class="subtitle">Diseño por cortante{" y torsión" if torsion is not None else ""} en viga según ACI 318-19</p>
-</div>
-
-<div class="metadata">
-  <span class="label">Proyecto:</span><span>{project_name}</span>
-  <span class="label">Fecha:</span><span>{fecha}</span>
-  <span class="label">Elemento:</span><span>{element_name}</span>
-  <span class="label">Tipo:</span><span>Viga rectangular</span>
-  <span class="label">Diseñador:</span><span>{designer or "—"}</span>
-  <span class="label">Norma:</span><span>ACI 318-19</span>
-</div>
-
-<h2>1. Datos de entrada</h2>
-
-<h3>1.1 Solicitación</h3>
-<table class="data">
+    loads_rows = f"""
   <tr><td>Cortante último</td><td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
-  {tu_row}
-</table>
+  {tu_row}"""
 
-<h3>1.2 Geometría</h3>
-<table class="data">
-  <tr><td>Ancho del alma</td><td>$b_w$</td><td class="num">{L(b)}</td></tr>
-  <tr><td>Altura total</td><td>$h$</td><td class="num">{L(h)}</td></tr>
-  <tr><td>Recubrimiento libre</td><td>$r$</td><td class="num">{L(result.cover_mm)}</td></tr>
-  <tr><td>Peralte efectivo asumido</td><td>$d$</td><td class="num">{L(d, 2)}</td></tr>
-</table>
-
-<h3>1.3 Materiales</h3>
-<table class="data">
-  <tr><td>Resistencia del concreto</td><td>$f'_c$</td><td class="num">{S(fc)}</td></tr>
+    materials_rows = f"""
   <tr><td>Fluencia del estribo</td><td>$f_{{yt}}$</td><td class="num">{S(fyt)}</td></tr>
   {fy_long_row}
-  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>
-</table>
+  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>"""
 
-<h3>1.4 Estribo propuesto</h3>
+    stirrup_block = f"""
+<h3>{si}.5 Estribo propuesto</h3>
 <table class="data">
   <tr><td>Diámetro del estribo</td><td>$d_e$</td><td class="num">{_bar_label(result.stirrup_diameter_mm)} ({result.stirrup_diameter_mm:.2f} mm)</td></tr>
   <tr><td>Número de ramas</td><td>$n$</td><td class="num">{result.stirrup_legs}</td></tr>
   <tr><td>Área total de ramas</td><td>$A_v = n \\cdot A_b$</td><td class="num">{av:.1f} mm²</td></tr>
 </table>
-{section_props_block}
-<h2>2. Cálculos de diseño (cortante)</h2>
+{section_props_block}"""
 
-<h3>2.1 Resistencia del concreto $V_c$
+    calc = f"""
+<h2>{sc}. Cálculos de diseño (cortante)</h2>
+
+<h3>{sc}.1 Resistencia del concreto $V_c$
   <span class="aci-ref">ACI 318-19 §22.5.5.1 (simplificada)</span>
 </h3>
 <div class="step">
@@ -1354,14 +974,14 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
     = {vc_n:.0f}\\;\\text{{N}} = {F(result.vc_kn)}$$
 </div>
 
-<h3>2.2 Capacidad reducida del concreto
+<h3>{sc}.2 Capacidad reducida del concreto
   <span class="aci-ref">ACI 318-19 §21.2.1, $\\phi = 0.75$</span>
 </h3>
 <div class="step">
   $$\\phi V_c = 0.75 \\cdot V_c = {phi_vc_n:.0f}\\;\\text{{N}} = {F(result.phi_vc_kn)}$$
 </div>
 
-<h3>2.3 Verificación del régimen</h3>
+<h3>{sc}.3 Verificación del régimen</h3>
 <p>Se compara $V_u$ con $\\phi V_c$ y $0.5\\,\\phi V_c$:</p>
 <table class="data">
   <tr><td>$0.5\\,\\phi V_c$</td><td class="num">{F(result.phi_vc_kn * 0.5)}</td></tr>
@@ -1372,7 +992,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
 
 {vs_block}
 
-<h3>2.6 Armado mínimo y separación máxima</h3>
+<h3>{sc}.6 Armado mínimo y separación máxima</h3>
 <p>Refuerzo mínimo por cortante <span class="aci-ref">ACI 318-19 §9.6.3.4</span>:</p>
 <div class="step">
   $$\\left(\\dfrac{{A_v}}{{s}}\\right)_{{min}} =
@@ -1390,7 +1010,7 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
   $$s_{{max}} = {L(result.s_max_mm, 1)}$$
 </div>
 {torsion_block}
-<h2>{sec_result}. Resultado del diseño</h2>
+<h3>{sc if torsion is None else st}.7 Resultado del refuerzo transversal</h3>
 <table class="data">
 {adopted_row}
 <tr><td>$\\phi V_n = \\phi(V_c + V_s)$ con $s$ adoptado</td>
@@ -1400,49 +1020,35 @@ es recomendable disponer estribos mínimos por consideraciones constructivas.</p
       <span class="chip {cap_class}">{cap_text}</span></td></tr>
 {torsion_result_rows}
 </table>
+"""
 
-{warnings_html}
-
-<h2>{sec_summary}. Resumen</h2>
-<div class="result-summary {status_class}">
-  <h3>Estado: {result.status}</h3>
-  <table class="data" style="margin-top: 8px;">
-    <tr><td>Sección</td><td>${L(b, 1)} \\times {L(h, 1)}$</td>
-        <td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
+    summary_rows = f"""
     <tr><td>Estribo</td><td><b>{_bar_label(result.stirrup_diameter_mm)} ({result.stirrup_legs} ramas)</b></td>
         <td>$\\phi V_c$</td><td class="num">{F(result.phi_vc_kn)}</td></tr>
     <tr><td>$s$ adoptado</td>
         <td><b>{L(result.s_adopted_mm, 1) if result.s_adopted_mm > 0 else '—'}</b></td>
         <td>$\\phi V_n$</td><td class="num"><b>{F(result.phi_vn_kn)}</b></td></tr>
-{torsion_summary_rows}
-  </table>
-</div>
+{torsion_summary_rows}"""
 
-<div class="doc-footer">
-  <p>Memoria generada por <b>Calculadora de Acero por Flexión</b> —
-  Diseño conforme a ACI 318-19 — {fecha}</p>
-</div>
-"""
-    kind = "Cortante y Torsión" if torsion is not None else "Cortante"
-    return _shear_envelope(
-        body, f"Memoria — {kind} {element_name}", element_name, kind=kind
-    )
-
-
-# Alias retrocompatible: la memoria de viga cubre cortante y, si aplica, torsión.
-generate_shear_beam_html_report = generate_shear_torsion_beam_html_report
+    return {
+        "loads": loads_rows,
+        "materials": materials_rows,
+        "stirrup": stirrup_block,
+        "calc": calc,
+        "summary_rows": summary_rows,
+        "warnings": result.warnings,
+        "has_torsion": torsion is not None,
+        "status_class": status_class,
+    }
 
 
-def generate_shear_slab_html_report(
+def _slab_shear_fragments(
     result: SlabShearResult,
     unit_system: UnitSystem,
-    project_name: str = "Proyecto sin título",
-    element_name: str = "Losa L-1",
-    designer: str = "",
-) -> str:
-    """Memoria de cálculo de cortante en losa (revisión, sin refuerzo)."""
+    sc: int = 4,
+) -> dict:
+    """Fragmentos de la revisión por cortante de la memoria de losa."""
     cv = get_converter(unit_system)
-    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     L = lambda mm, d=1: cv.format_length_small(mm, d)
     F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
@@ -1468,73 +1074,57 @@ def generate_shear_slab_html_report(
     cap_class = "ok" if (ratio == float("inf") or ratio >= 1.0) else "fail"
     cap_text = "CUMPLE" if (ratio == float("inf") or ratio >= 1.0) else "NO CUMPLE"
 
-    warnings_html = ""
-    if result.warnings:
-        warnings_html = (
-            '<div class="alert alert-warn"><h3>⚠ Advertencias</h3><ul>'
-            + "".join(f"<li>{w}</li>" for w in result.warnings)
-            + "</ul></div>"
-        )
+    rho_note = (
+        " La cuantía se tomó del acero de flexión diseñado en esta misma memoria."
+        if not result.rho_w_assumed else
+        f" No se conoce el acero longitudinal, por lo que se usó el mínimo por "
+        f"retracción y temperatura $\\rho_w = {result.rho_w:.4f}$ (ACI 24.4.3.2)."
+    )
 
-    body = f"""
-<div class="doc-header">
-  <h1>Memoria de Cálculo</h1>
-  <p class="subtitle">Revisión de cortante en losa según ACI 318-19</p>
-</div>
-
-<div class="metadata">
-  <span class="label">Proyecto:</span><span>{project_name}</span>
-  <span class="label">Fecha:</span><span>{fecha}</span>
-  <span class="label">Elemento:</span><span>{element_name}</span>
-  <span class="label">Tipo:</span><span>Losa (franja unitaria 1 m)</span>
-  <span class="label">Diseñador:</span><span>{designer or "—"}</span>
-  <span class="label">Norma:</span><span>ACI 318-19 §22.5</span>
-</div>
-
-<h2>1. Datos de entrada</h2>
-
-<h3>1.1 Solicitación</h3>
-<table class="data">
+    loads_rows = f"""
   <tr><td>Cortante último por franja unitaria</td><td>$V_u$</td>
-      <td class="num">{F(result.vu_kn)}</td></tr>
-</table>
+      <td class="num">{F(result.vu_kn)}</td></tr>"""
 
-<h3>1.2 Geometría</h3>
-<table class="data">
-  <tr><td>Ancho considerado (franja 1 m)</td><td>$b$</td><td class="num">{L(b, 1)}</td></tr>
-  <tr><td>Espesor de losa</td><td>$h$</td><td class="num">{L(h, 1)}</td></tr>
-  <tr><td>Recubrimiento libre</td><td>$r$</td><td class="num">{L(result.cover_mm, 1)}</td></tr>
-  <tr><td>Peralte efectivo asumido</td><td>$d$</td><td class="num">{L(d, 2)}</td></tr>
-</table>
+    materials_rows = f"""
+  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>"""
 
-<h3>1.3 Materiales</h3>
-<table class="data">
-  <tr><td>Resistencia del concreto</td><td>$f'_c$</td><td class="num">{S(fc)}</td></tr>
-  <tr><td>Factor por concreto</td><td>$\\lambda$</td><td class="num">{lam:.2f}</td></tr>
-</table>
+    calc = f"""
+<h2>{sc}. Revisión por cortante</h2>
 
-<h2>2. Cálculos</h2>
-
-<h3>2.1 Resistencia del concreto $V_c$
-  <span class="aci-ref">ACI 318-19 §22.5.5.1</span>
+<h3>{sc}.1 Resistencia del concreto $V_c$
+  <span class="aci-ref">ACI 318-19 Tabla 22.5.5.1 ($A_v < A_{{v,min}}$)</span>
 </h3>
-<p>Para losas, el refuerzo transversal no está permitido (ACI 8.6.1) cuando
-$h$ es pequeño, por lo que la resistencia al cortante depende exclusivamente
-del concreto:</p>
+<p>La losa no lleva refuerzo transversal (ACI 8.6.1), así que $V_c$ se evalúa con
+la cuantía longitudinal y el factor de tamaño, no con la forma simplificada
+$0.17\\lambda\\sqrt{{f'_c}}$, que sólo aplica a elementos con $A_v \\ge A_{{v,min}}$.
+{rho_note}</p>
 <div class="step">
-  <div class="step-title">$V_c = 0.17 \\lambda \\sqrt{{f'_c}}\\, b\\, d$</div>
-  $$V_c = 0.17 \\cdot {lam:.2f} \\cdot \\sqrt{{{fc:.1f}}} \\cdot {b:.1f} \\cdot {d:.2f}
+  <div class="step-title">Cuantía longitudinal</div>
+  $$\\rho_w = \\dfrac{{A_s}}{{b\\,d}} = \\dfrac{{{result.as_long_mm2:.0f}}}{{{b:.1f} \\cdot {d:.2f}}}
+    = {result.rho_w:.5f}$$
+</div>
+<div class="step">
+  <div class="step-title">Factor de tamaño
+    <span class="aci-ref">ACI 318-19 §22.5.5.1.3</span></div>
+  $$\\lambda_s = \\sqrt{{\\dfrac{{2}}{{1 + d/250}}}} \\le 1.0
+    = \\sqrt{{\\dfrac{{2}}{{1 + {d:.2f}/250}}}} = {result.lambda_s:.3f}$$
+</div>
+<div class="step">
+  <div class="step-title">$V_c = 0.66\\,\\lambda_s\\,\\lambda\\,(\\rho_w)^{{1/3}}
+    \\sqrt{{f'_c}}\\, b\\, d$</div>
+  $$V_c = 0.66 \\cdot {result.lambda_s:.3f} \\cdot {lam:.2f} \\cdot
+    ({result.rho_w:.5f})^{{1/3}} \\cdot \\sqrt{{{fc:.1f}}} \\cdot {b:.1f} \\cdot {d:.2f}
     = {vc_n:.0f}\\;\\text{{N}} = {F(result.vc_kn)}$$
 </div>
 
-<h3>2.2 Capacidad reducida
+<h3>{sc}.2 Capacidad reducida
   <span class="aci-ref">ACI 318-19 §21.2.1, $\\phi = 0.75$</span>
 </h3>
 <div class="step">
   $$\\phi V_c = 0.75 \\cdot V_c = {phi_vc_n:.0f}\\;\\text{{N}} = {F(result.phi_vc_kn)}$$
 </div>
 
-<h2>3. Verificación</h2>
+<h3>{sc}.3 Verificación</h3>
 <p>Para que la losa no requiera refuerzo por cortante debe cumplirse
 $\\phi V_c \\ge V_u$:</p>
 
@@ -1545,25 +1135,210 @@ $\\phi V_c \\ge V_u$:</p>
       <td class="num"><b>{ratio_str}</b>
         <span class="chip {cap_class}">{cap_text}</span></td></tr>
 </table>
+"""
 
-{warnings_html}
-
-<h2>4. Resumen</h2>
-<div class="result-summary {status_class}">
-  <h3>Estado: {result.status}</h3>
-  <table class="data" style="margin-top: 8px;">
-    <tr><td>Sección</td><td>${L(b, 1)} \\times {L(h, 1)}$</td>
-        <td>$V_u$</td><td class="num">{F(result.vu_kn)}</td></tr>
-    <tr><td>$d$ efectivo</td><td class="num">{L(d, 2)}</td>
+    summary_rows = f"""
+    <tr><td>$\\rho_w$ usado en $V_c$</td><td class="num">{result.rho_w:.5f}</td>
         <td>$\\phi V_c$</td><td class="num"><b>{F(result.phi_vc_kn)}</b></td></tr>
-    <tr><td>$f'_c$</td><td class="num">{S(fc)}</td>
-        <td>$\\phi V_c / V_u$</td><td class="num"><b>{ratio_str}</b></td></tr>
-  </table>
+    <tr><td>$V_u$</td><td class="num">{F(result.vu_kn)}</td>
+        <td>$\\phi V_c / V_u$</td><td class="num"><b>{ratio_str}</b></td></tr>"""
+
+    return {
+        "loads": loads_rows,
+        "materials": materials_rows,
+        "calc": calc,
+        "summary_rows": summary_rows,
+        "warnings": result.warnings,
+        "status_class": status_class,
+    }
+
+
+# ============================================================
+#              Memorias unificadas por elemento
+# ============================================================
+
+def _worst_status(*statuses: str) -> str:
+    """Estado global: manda el más desfavorable de los análisis."""
+    for bad in ("ERROR", "AUMENTAR SECCIÓN", "ARMADO INSUFICIENTE", "REDUCIR SECCIÓN"):
+        if bad in statuses:
+            return bad
+    return "OK"
+
+
+def _warnings_block(*groups) -> str:
+    items = [w for group in groups for w in group]
+    if not items:
+        return ""
+    return (
+        '<div class="alert alert-warn"><h3>⚠ Advertencias</h3><ul>'
+        + "".join(f"<li>{w}</li>" for w in items)
+        + "</ul></div>"
+    )
+
+
+def _doc_head(subtitle: str, info: "ProjectInfo", element_name: str,
+              section_type: str, fecha: str) -> str:
+    notes = (
+        f'<div class="doc-notes"><b>Notas:</b> {escape(info.notes)}</div>'
+        if info.notes else ""
+    )
+    return f"""
+<div class="doc-header">
+  <h1>Memoria de Cálculo</h1>
+  <p class="subtitle">{subtitle}</p>
 </div>
 
+<div class="metadata">
+  <span class="label">Proyecto:</span><span>{escape(info.project)}</span>
+  <span class="label">Fecha:</span><span>{fecha}</span>
+  <span class="label">Elemento:</span><span>{escape(element_name)}</span>
+  <span class="label">Tipo:</span><span>{section_type}</span>
+  <span class="label">Diseñador:</span><span>{escape(info.designer) or "—"}</span>
+  <span class="label">Revisor:</span><span>{escape(info.reviewer) or "—"}</span>
+  <span class="label">Revisión:</span><span>{escape(info.revision) or "—"}</span>
+  <span class="label">Norma:</span><span>ACI 318-19</span>
+</div>
+{notes}
+"""
+
+
+def _doc_footer(fecha: str) -> str:
+    return f"""
 <div class="doc-footer">
-  <p>Memoria generada por <b>Calculadora de Acero por Flexión</b> —
-  Revisión conforme a ACI 318-19 §22.5 — {fecha}</p>
+  <p>Memoria generada por <b>{APP_NAME} v{__version__}</b> —
+  Diseño conforme a ACI 318-19 — {fecha}</p>
 </div>
 """
-    return _shear_envelope(body, f"Memoria — Cortante {element_name}", element_name)
+
+
+def generate_beam_report(
+    flexion: FlexionDesignResult,
+    shear: BeamShearResult,
+    unit_system: UnitSystem,
+    info: Optional[ProjectInfo] = None,
+) -> str:
+    """Memoria única de viga: flexión, cortante y —si aplica— torsión."""
+    info = info or ProjectInfo()
+    element_name = info.beam_name
+    cv = get_converter(unit_system)
+    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+    L = lambda mm, d=1: cv.format_length_small(mm, d)
+    A = lambda cm2, d=2: cv.format_area(cm2, d)
+    M = lambda knm, d=2: f"{knm / cv.moment_to_knm:.{d}f} {cv.moment_unit}"
+    F = lambda kn, d=2: f"{kn / cv.force_to_kn:.{d}f} {cv.force_unit}"
+
+    sh = _beam_shear_fragments(shear, unit_system, si=1, sc=4, st=5)
+    fx = _flexion_fragments(
+        flexion, unit_system, section_type="Viga",
+        extra_load_rows=sh["loads"],
+        extra_material_rows=sh["materials"],
+        extra_input_blocks=sh["stirrup"],
+    )
+
+    sec_summary = 6 if sh["has_torsion"] else 5
+    subtitle = (
+        "Diseño por flexión, cortante y torsión en viga según ACI 318-19"
+        if sh["has_torsion"] else
+        "Diseño por flexión y cortante en viga según ACI 318-19"
+    )
+    status = _worst_status(flexion.status, shear.status)
+    status_class = (
+        "ok" if status == "OK"
+        else "warn" if status == "REDUCIR SECCIÓN" else "fail"
+    )
+
+    body = (
+        _doc_head(subtitle, info, element_name, "Viga rectangular", fecha)
+        + fx["inputs"]
+        + fx["calc"]
+        + sh["calc"]
+        + _warnings_block(flexion.warnings, sh["warnings"])
+        + f"""
+<h2>{sec_summary}. Resumen del diseño</h2>
+<div class="result-summary {status_class}">
+  <h3>Estado: {status}</h3>
+  <table class="data" style="margin-top: 8px;">
+    <tr><td>Sección</td><td>${L(flexion.b_mm, 1)} \\times {L(flexion.h_mm, 1)}$</td>
+        <td>$d$ efectivo</td><td class="num">{L(flexion.d_mm, 2)}</td></tr>
+    <tr><td>Refuerzo a flexión</td><td><b>{fx["layers_summary"]}</b></td>
+        <td>$A_s$ total</td><td class="num"><b>{A(flexion.as_provided_cm2)}</b></td></tr>
+    <tr><td>$M_u$</td><td class="num">{M(flexion.mu_demand_knm)}</td>
+        <td>$\\phi M_n$</td><td class="num"><b>{M(flexion.phi_mn_knm)}</b></td></tr>
+    <tr><td>Estado a flexión</td><td>{flexion.status}</td>
+        <td>$\\phi M_n / M_u$</td><td class="num"><b>{fx["ratio"]:.3f}</b></td></tr>
+    <tr><td>$V_u$</td><td class="num">{F(shear.vu_kn)}</td>
+        <td>Estado a cortante</td><td>{shear.status}</td></tr>
+{sh["summary_rows"]}
+  </table>
+</div>
+"""
+        + _doc_footer(fecha)
+    )
+
+    kind = "Flexión, Cortante y Torsión" if sh["has_torsion"] else "Flexión y Cortante"
+    return _document(
+        body, f"Memoria — {element_name}", element_name, kind=kind
+    )
+
+
+def generate_slab_report(
+    flexion: FlexionDesignResult,
+    shear: SlabShearResult,
+    unit_system: UnitSystem,
+    info: Optional[ProjectInfo] = None,
+) -> str:
+    """Memoria única de losa: flexión y cortante sobre la franja unitaria."""
+    info = info or ProjectInfo()
+    element_name = info.slab_name
+    cv = get_converter(unit_system)
+    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+    L = lambda mm, d=1: cv.format_length_small(mm, d)
+    A = lambda cm2, d=2: cv.format_area(cm2, d)
+    M = lambda knm, d=2: f"{knm / cv.moment_to_knm:.{d}f} {cv.moment_unit}"
+
+    sh = _slab_shear_fragments(shear, unit_system, sc=4)
+    fx = _flexion_fragments(
+        flexion, unit_system, section_type="Losa (franja unitaria)",
+        extra_load_rows=sh["loads"],
+        extra_material_rows=sh["materials"],
+    )
+
+    status = _worst_status(flexion.status, shear.status)
+    status_class = (
+        "ok" if status == "OK"
+        else "warn" if status == "REDUCIR SECCIÓN" else "fail"
+    )
+
+    body = (
+        _doc_head("Diseño por flexión y revisión por cortante en losa según ACI 318-19",
+                  info, element_name, "Losa (franja unitaria 1 m)", fecha)
+        + fx["inputs"]
+        + fx["calc"]
+        + sh["calc"]
+        + _warnings_block(flexion.warnings, sh["warnings"])
+        + f"""
+<h2>5. Resumen del diseño</h2>
+<div class="result-summary {status_class}">
+  <h3>Estado: {status}</h3>
+  <table class="data" style="margin-top: 8px;">
+    <tr><td>Franja</td><td>${L(flexion.b_mm, 1)} \\times {L(flexion.h_mm, 1)}$</td>
+        <td>$d$ efectivo</td><td class="num">{L(flexion.d_mm, 2)}</td></tr>
+    <tr><td>Refuerzo a flexión</td><td><b>{fx["layers_summary"]}</b></td>
+        <td>$A_s$ total</td><td class="num"><b>{A(flexion.as_provided_cm2)}</b></td></tr>
+    <tr><td>$M_u$</td><td class="num">{M(flexion.mu_demand_knm)}</td>
+        <td>$\\phi M_n$</td><td class="num"><b>{M(flexion.phi_mn_knm)}</b></td></tr>
+    <tr><td>Estado a flexión</td><td>{flexion.status}</td>
+        <td>$\\phi M_n / M_u$</td><td class="num"><b>{fx["ratio"]:.3f}</b></td></tr>
+    <tr><td>Estado a cortante</td><td>{shear.status}</td>
+        <td>$d$ usado en $V_c$</td><td class="num">{L(shear.d_mm, 2)}</td></tr>
+{sh["summary_rows"]}
+  </table>
+</div>
+"""
+        + _doc_footer(fecha)
+    )
+
+    return _document(
+        body, f"Memoria — {element_name}", element_name,
+        kind="Flexión y Cortante"
+    )

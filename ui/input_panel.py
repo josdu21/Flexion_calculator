@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
 from core.flexion import ReinforcementConfig, RebarLayer
-from ui.form_helpers import scroll_form
+from ui.form_helpers import scroll_form, set_si, set_choice
 
 
 MAX_LAYERS = 4
@@ -301,6 +301,48 @@ class InputPanel(QWidget):
             layers=layers,
             stirrup_diameter_mm=stirrup_rebar.diameter_mm,
         )
+
+    def get_state(self) -> dict:
+        """Estado serializable del panel, con las magnitudes en SI internas."""
+        cv = get_converter(self.unit_system)
+        return {
+            "mu_nmm": self.mu_spinbox.value() * cv.moment_to_knm * 1e6,
+            "b_mm": (None if self.is_slab
+                     else self.b_spinbox.value() * cv.length_to_m * 1000.0),
+            "h_mm": self.h_spinbox.value() * cv.length_to_m * 1000.0,
+            "cover_mm": self.cover_spinbox.value() * cv.length_to_m * 1000.0,
+            "fc_mpa": self.fc_spinbox.value() * cv.stress_to_mpa,
+            "fy_mpa": self.fy_spinbox.value() * cv.stress_to_mpa,
+            "main_bar": self.main_bar_combo.currentData(),
+            "stirrup_bar": (self.stirrup_combo.currentData()
+                            if self.stirrup_combo else None),
+            "n_layers": self.layers_spin.value() if self.layers_spin else 1,
+            "layer_bars": [s.value() for s in self.layer_bar_spins],
+        }
+
+    def set_state(self, state: dict) -> None:
+        """Restaura el panel desde un estado en SI, sin recalcular por cada campo."""
+        cv = get_converter(self.unit_system)
+        self._building = True
+        try:
+            set_si(self.mu_spinbox, state.get("mu_nmm"), 1e6 * cv.moment_to_knm)
+            if not self.is_slab:
+                set_si(self.b_spinbox, state.get("b_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
+            set_si(self.fy_spinbox, state.get("fy_mpa"), cv.stress_to_mpa)
+            set_choice(self.main_bar_combo, state.get("main_bar"))
+            set_choice(self.stirrup_combo, state.get("stirrup_bar"))
+
+            if self.layers_spin is not None and state.get("n_layers"):
+                self.layers_spin.setValue(int(state["n_layers"]))
+                self._on_layers_changed(int(state["n_layers"]))
+            for spin, n in zip(self.layer_bar_spins, state.get("layer_bars") or []):
+                spin.setValue(int(n))
+        finally:
+            self._building = False
+        self.values_changed.emit()
 
     def get_values(self) -> dict:
         """Valores convertidos a SI internas (N·mm, mm, MPa) más reinforcement."""

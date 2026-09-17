@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
-from ui.form_helpers import scroll_form
+from ui.form_helpers import scroll_form, set_si, set_choice
 
 
 STIRRUP_BAR_NUMBERS = [2, 3, 4, 5]
@@ -314,6 +314,49 @@ class BeamShearInputPanel(QWidget):
         self._building = False
         self.values_changed.emit()
 
+    def get_state(self) -> dict:
+        """Estado serializable del panel, con las magnitudes en SI internas."""
+        cv = get_converter(self.unit_system)
+        return {
+            "vu_n": self.vu_spinbox.value() * _force_input_factor(self.unit_system),
+            "b_mm": self.b_spinbox.value() * cv.length_to_m * 1000.0,
+            "h_mm": self.h_spinbox.value() * cv.length_to_m * 1000.0,
+            "cover_mm": self.cover_spinbox.value() * cv.length_to_m * 1000.0,
+            "fc_mpa": self.fc_spinbox.value() * cv.stress_to_mpa,
+            "fyt_mpa": self.fyt_spinbox.value() * cv.stress_to_mpa,
+            "stirrup_bar": self.stirrup_combo.currentData(),
+            "legs": self.legs_combo.currentData(),
+            "db_long_bar": self.db_long_combo.currentData(),
+            "torsion_enabled": self.torsion_group.isChecked(),
+            "tu_nmm": self.tu_spinbox.value() * cv.moment_to_knm * 1e6,
+            "fy_long_mpa": self.fy_long_spinbox.value() * cv.stress_to_mpa,
+            "torsion_type": self.torsion_type_combo.currentData(),
+        }
+
+    def set_state(self, state: dict) -> None:
+        """Restaura el panel desde un estado en SI, sin recalcular por cada campo."""
+        cv = get_converter(self.unit_system)
+        self._building = True
+        try:
+            set_si(self.vu_spinbox, state.get("vu_n"),
+                   _force_input_factor(self.unit_system))
+            set_si(self.b_spinbox, state.get("b_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
+            set_si(self.fyt_spinbox, state.get("fyt_mpa"), cv.stress_to_mpa)
+            set_si(self.tu_spinbox, state.get("tu_nmm"), 1e6 * cv.moment_to_knm)
+            set_si(self.fy_long_spinbox, state.get("fy_long_mpa"), cv.stress_to_mpa)
+            set_choice(self.stirrup_combo, state.get("stirrup_bar"))
+            set_choice(self.legs_combo, state.get("legs"))
+            set_choice(self.db_long_combo, state.get("db_long_bar"))
+            set_choice(self.torsion_type_combo, state.get("torsion_type"))
+            if "torsion_enabled" in state:
+                self.torsion_group.setChecked(bool(state["torsion_enabled"]))
+        finally:
+            self._building = False
+        self.values_changed.emit()
+
     def get_values(self) -> dict:
         cv = get_converter(self.unit_system)
         vu_n = self.vu_spinbox.value() * _force_input_factor(self.unit_system)
@@ -485,6 +528,32 @@ class SlabShearInputPanel(QWidget):
             QWidget().setLayout(old_layout)
         self._build_ui()
         self._building = False
+        self.values_changed.emit()
+
+    def get_state(self) -> dict:
+        """Estado serializable del panel, con las magnitudes en SI internas."""
+        cv = get_converter(self.unit_system)
+        return {
+            "vu_n": self.vu_spinbox.value() * _force_input_factor(self.unit_system),
+            "h_mm": self.h_spinbox.value() * cv.length_to_m * 1000.0,
+            "cover_mm": self.cover_spinbox.value() * cv.length_to_m * 1000.0,
+            "fc_mpa": self.fc_spinbox.value() * cv.stress_to_mpa,
+            "db_long_bar": self.db_long_combo.currentData(),
+        }
+
+    def set_state(self, state: dict) -> None:
+        """Restaura el panel desde un estado en SI, sin recalcular por cada campo."""
+        cv = get_converter(self.unit_system)
+        self._building = True
+        try:
+            set_si(self.vu_spinbox, state.get("vu_n"),
+                   _force_input_factor(self.unit_system))
+            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
+            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
+            set_choice(self.db_long_combo, state.get("db_long_bar"))
+        finally:
+            self._building = False
         self.values_changed.emit()
 
     def get_values(self) -> dict:

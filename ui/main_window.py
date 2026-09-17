@@ -1,4 +1,4 @@
-"""Ventana principal de la Calculadora de Acero (Flexión + Cortante + Torsión)."""
+"""Ventana principal de Beam Calculator (Flexión + Cortante + Torsión)."""
 import os
 import webbrowser
 from PyQt6.QtWidgets import (
@@ -8,31 +8,41 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSignalBlocker
 
+from core.version import APP_NAME, APP_TAGLINE, __version__
 from core.units import UnitSystem
 from core.flexion import BeamSection
 from core.shear import SlabShearCheck
 from core.torsion import BeamShearTorsionDesign
-from core.report import (
-    generate_html_report,
-    generate_shear_torsion_beam_html_report,
-    generate_shear_slab_html_report,
+from core.report import generate_beam_report, generate_slab_report
+from core.project import (
+    FILE_FILTER, ProjectInfo, Study, StudyFileError, load_study, save_study,
 )
 from ui.input_panel import InputPanel
+from ui.project_dialog import ProjectDialog
 from ui.results_panel import ResultsPanel
 from ui.shear_input_panel import BeamShearInputPanel, SlabShearInputPanel
 from ui.shear_results_panel import ShearResultsPanel
 from ui.theme import build_stylesheet
 
 
+APP_TITLE = f"{APP_NAME} {__version__} — Flexión, Cortante y Torsión (ACI 318-19)"
+
+
+def _slug(name: str) -> str:
+    """Nombre de elemento convertido en un nombre de archivo seguro."""
+    limpio = "".join(c if c.isalnum() else "_" for c in name).strip("_")
+    return limpio.lower() or "elemento"
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_unit_system = UnitSystem.SI
+        self.project_info = ProjectInfo()
+        self.current_path = None
         self._initializing = True
         self._init_ui()
-        self.setWindowTitle(
-            "Calculadora de Acero por Flexión, Cortante y Torsión — ACI 318-19"
-        )
+        self._refresh_title()
         self.resize(1240, 800)
         self.setMinimumSize(960, 640)
         self.setStyleSheet(build_stylesheet())
@@ -61,9 +71,9 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 16, 24, 16)
         identity = QVBoxLayout()
-        title = QLabel("Calculadora de acero")
+        title = QLabel(APP_NAME)
         title.setObjectName("headerTitle")
-        subtitle = QLabel("ACI 318-19  /  Diseño de refuerzo")
+        subtitle = QLabel(f"v{__version__}  /  {APP_TAGLINE}")
         subtitle.setObjectName("headerSubtitle")
         identity.addWidget(title)
         identity.addWidget(subtitle)
@@ -79,6 +89,26 @@ class MainWindow(QMainWindow):
         unit_label.setBuddy(self.unit_combo)
         self.unit_combo.currentIndexChanged.connect(self._on_unit_changed)
         header_layout.addWidget(self.unit_combo)
+        self.project_button = QPushButton("Datos del proyecto")
+        self.project_button.setToolTip(
+            "Proyecto, diseñador, revisor, revisión y notas del cajetín (Ctrl+I)"
+        )
+        self.project_button.setShortcut("Ctrl+I")
+        self.project_button.clicked.connect(self._edit_project_info)
+        header_layout.addWidget(self.project_button)
+
+        self.open_button = QPushButton("Abrir")
+        self.open_button.setToolTip("Abrir un estudio guardado (Ctrl+O)")
+        self.open_button.setShortcut("Ctrl+O")
+        self.open_button.clicked.connect(self._open_study)
+        header_layout.addWidget(self.open_button)
+
+        self.save_button = QPushButton("Guardar")
+        self.save_button.setToolTip("Guardar el estudio completo (Ctrl+S)")
+        self.save_button.setShortcut("Ctrl+S")
+        self.save_button.clicked.connect(self._save_study)
+        header_layout.addWidget(self.save_button)
+
         self.report_button = QPushButton("Exportar memoria")
         self.report_button.setToolTip("Guardar la memoria HTML del análisis activo (Ctrl+E)")
         self.report_button.setShortcut("Ctrl+E")
@@ -215,9 +245,12 @@ class MainWindow(QMainWindow):
         ]
 
     def _on_analysis_changed(self):
-        self.report_button.setToolTip(
-            f"Exportar memoria: {self.tabs.tabText(self.tabs.currentIndex())} (Ctrl+E)"
-        )
+        is_beam, _ = self._active_context()
+        if is_beam:
+            alcance = f"{self.project_info.beam_name} — flexión, cortante y torsión"
+        else:
+            alcance = f"{self.project_info.slab_name} — flexión y cortante"
+        self.report_button.setToolTip(f"Exportar memoria: {alcance} (Ctrl+E)")
         self.statusBar().showMessage(self.tabs.tabText(self.tabs.currentIndex()))
 
     def _connect_shared_sections(self):
@@ -252,12 +285,31 @@ class MainWindow(QMainWindow):
         if self.tabs.currentIndex() == index:
             self.statusBar().showMessage(message, timeout)
 
+    def _beam_flex_design(self):
+        """Diseño a flexión de la viga, usado también por el análisis de cortante."""
+        return BeamSection(**self.beam_flex_inputs.get_values()).design()
+
+    def _slab_flex_design(self):
+        """Diseño a flexión de la losa, usado también por el análisis de cortante."""
+        return BeamSection(**self.slab_flex_inputs.get_values()).design()
+
+    def _beam_shear_design(self):
+        """Cortante/torsión de la viga con el d real del diseño a flexión."""
+        values = self.beam_shear_inputs.get_values()
+        values["d_mm"] = self._beam_flex_design().d_mm
+        return BeamShearTorsionDesign(**values).design()
+
+    def _slab_shear_check(self):
+        """Cortante de la losa con la cuantía longitudinal del diseño a flexión."""
+        values = self.slab_shear_inputs.get_values()
+        values["as_long_mm2"] = self._slab_flex_design().as_provided_cm2 * 100.0
+        return SlabShearCheck(**values).check()
+
     def calculate_beam_flex(self):
         if self._initializing:
             return
         try:
-            values = self.beam_flex_inputs.get_values()
-            result = BeamSection(**values).design()
+            result = self._beam_flex_design()
             self.beam_flex_results.display_results(result)
             self._show_calculation_status(0,
                 f"Viga (flexión) • Estado: {result.status}", 3000
@@ -265,13 +317,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.beam_flex_results.clear()
             self.statusBar().showMessage(f"Error en viga (flexión): {e}", 5000)
+            return
+        # El peralte efectivo alimenta el cortante: mantener ambos en sincronía.
+        self.calculate_beam_shear()
 
     def calculate_slab_flex(self):
         if self._initializing:
             return
         try:
-            values = self.slab_flex_inputs.get_values()
-            result = BeamSection(**values).design()
+            result = self._slab_flex_design()
             self.slab_flex_results.display_results(result)
             self._show_calculation_status(2,
                 f"Losa (flexión) • Estado: {result.status}", 3000
@@ -279,13 +333,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.slab_flex_results.clear()
             self.statusBar().showMessage(f"Error en losa (flexión): {e}", 5000)
+            return
+        # La cuantía longitudinal entra en Vc: mantener ambos en sincronía.
+        self.calculate_slab_shear()
 
     def calculate_beam_shear(self):
         if self._initializing:
             return
         try:
-            values = self.beam_shear_inputs.get_values()
-            result = BeamShearTorsionDesign(**values).design()
+            result = self._beam_shear_design()
             self.beam_shear_results.display_results(result)
             label = "cortante + torsión" if result.torsion_active else "cortante"
             self._show_calculation_status(1,
@@ -299,8 +355,7 @@ class MainWindow(QMainWindow):
         if self._initializing:
             return
         try:
-            values = self.slab_shear_inputs.get_values()
-            result = SlabShearCheck(**values).check()
+            result = self._slab_shear_check()
             self.slab_shear_results.display_results(result)
             self._show_calculation_status(3,
                 f"Losa (cortante) • Estado: {result.status}", 3000
@@ -310,54 +365,113 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Error en losa (cortante): {e}", 5000)
 
     # ------------------------------------------------------------
+    #              Datos del proyecto y archivo del estudio
+    # ------------------------------------------------------------
+
+    def _panels(self):
+        """Paneles de entrada, con la clave que los identifica en el archivo."""
+        return {
+            "viga_flexion": self.beam_flex_inputs,
+            "viga_cortante": self.beam_shear_inputs,
+            "losa_flexion": self.slab_flex_inputs,
+            "losa_cortante": self.slab_shear_inputs,
+        }
+
+    def _refresh_title(self):
+        nombre = os.path.basename(self.current_path) if self.current_path else None
+        self.setWindowTitle(f"{nombre} — {APP_TITLE}" if nombre else APP_TITLE)
+
+    def _edit_project_info(self):
+        dialog = ProjectDialog(self.project_info, self)
+        if dialog.exec():
+            self.project_info = dialog.values()
+            self._on_analysis_changed()
+            self.statusBar().showMessage("Datos del proyecto actualizados", 3000)
+
+    def _save_study(self):
+        suggested = self.current_path or os.path.join(
+            os.path.expanduser("~"), "estudio.json"
+        )
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar estudio", suggested, FILE_FILTER
+        )
+        if not file_path:
+            return
+        try:
+            save_study(file_path, Study(
+                info=self.project_info,
+                unit_system=self.current_unit_system,
+                panels={k: p.get_state() for k, p in self._panels().items()},
+            ))
+        except OSError as e:
+            QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar:\n\n{e}")
+            return
+        self.current_path = file_path
+        self._refresh_title()
+        self.statusBar().showMessage(f"Estudio guardado en: {file_path}", 6000)
+
+    def _open_study(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Abrir estudio", os.path.expanduser("~"), FILE_FILTER
+        )
+        if not file_path:
+            return
+        try:
+            study = load_study(file_path)
+        except (StudyFileError, OSError) as e:
+            QMessageBox.critical(self, "Error al abrir", f"No se pudo abrir:\n\n{e}")
+            return
+
+        self.project_info = study.info
+        # Cambiar de unidades reconstruye los campos, así que va antes de cargarlos.
+        if study.unit_system != self.current_unit_system:
+            self.unit_combo.setCurrentIndex(
+                self.unit_combo.findData(study.unit_system)
+            )
+
+        self._initializing = True
+        try:
+            for key, panel in self._panels().items():
+                if key in study.panels:
+                    panel.set_state(study.panels[key])
+        finally:
+            self._initializing = False
+
+        self.calculate_beam_flex()
+        self.calculate_slab_flex()
+        self.current_path = file_path
+        self._refresh_title()
+        self._on_analysis_changed()
+        self.statusBar().showMessage(f"Estudio abierto: {file_path}", 6000)
+
+    # ------------------------------------------------------------
     #                       Memoria HTML
     # ------------------------------------------------------------
 
     def _export_report(self):
         try:
-            is_beam, is_flexion = self._active_context()
+            is_beam, _ = self._active_context()
 
-            if is_flexion:
-                inputs = self.beam_flex_inputs if is_beam else self.slab_flex_inputs
-                values = inputs.get_values()
-                result = BeamSection(**values).design()
-                section_type = "Viga" if is_beam else "Losa (franja unitaria)"
-                element_name = "Viga V-1" if is_beam else "Losa L-1"
-                html = generate_html_report(
-                    result=result,
-                    inputs_user=values,
+            # Una sola memoria por elemento: la viga cubre flexión, cortante y
+            # torsión; la losa cubre flexión y cortante.
+            if is_beam:
+                html = generate_beam_report(
+                    flexion=self._beam_flex_design(),
+                    shear=self._beam_shear_design(),
                     unit_system=self.current_unit_system,
-                    section_type=section_type,
-                    project_name="Proyecto",
-                    element_name=element_name,
+                    info=self.project_info,
                 )
-                file_prefix = "memoria_flexion_viga" if is_beam else "memoria_flexion_losa"
+                nombre = self.project_info.beam_name
             else:
-                if is_beam:
-                    values = self.beam_shear_inputs.get_values()
-                    result = BeamShearTorsionDesign(**values).design()
-                    html = generate_shear_torsion_beam_html_report(
-                        result=result,
-                        unit_system=self.current_unit_system,
-                        project_name="Proyecto",
-                        element_name="Viga V-1",
-                    )
-                    file_prefix = (
-                        "memoria_cortante_torsion_viga" if result.torsion_active
-                        else "memoria_cortante_viga"
-                    )
-                else:
-                    values = self.slab_shear_inputs.get_values()
-                    result = SlabShearCheck(**values).check()
-                    html = generate_shear_slab_html_report(
-                        result=result,
-                        unit_system=self.current_unit_system,
-                        project_name="Proyecto",
-                        element_name="Losa L-1",
-                    )
-                    file_prefix = "memoria_cortante_losa"
+                html = generate_slab_report(
+                    flexion=self._slab_flex_design(),
+                    shear=self._slab_shear_check(),
+                    unit_system=self.current_unit_system,
+                    info=self.project_info,
+                )
+                nombre = self.project_info.slab_name
 
-            default_name = f"{file_prefix}.html"
+            default_name = f"memoria_{_slug(nombre)}.html"
             home = os.path.expanduser("~")
             suggested_path = os.path.join(home, default_name)
 

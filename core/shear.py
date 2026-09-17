@@ -13,17 +13,45 @@ from typing import List, Optional
 
 PHI_SHEAR = 0.75              # ACI 318-19 §21.2.1 (cortante)
 S_PRACTICAL_ROUND_MM = 5.0    # redondeo práctico de la separación adoptada
+RHO_W_MIN_SLAB = 0.0018       # ACI 318-19 §24.4.3.2 (retracción y temperatura)
 
 
 def vc_one_way(fc_mpa: float, lam: float, b_mm: float, d_mm: float) -> float:
     """Resistencia al cortante del concreto en una dirección, en Newtons.
 
-    ACI 318-19 §22.5.5.1 (forma simplificada, sin Nu):
+    ACI 318-19 Tabla 22.5.5.1, caso con Av ≥ Av,min (forma simplificada, sin Nu):
         Vc = 0.17 · λ · √f'c · bw · d   [N, MPa, mm]
+
+    Sólo aplica cuando el elemento lleva al menos el refuerzo transversal
+    mínimo. Para elementos sin estribos usar :func:`vc_no_stirrups`.
     """
     if fc_mpa <= 0 or b_mm <= 0 or d_mm <= 0:
         return 0.0
     return 0.17 * lam * math.sqrt(fc_mpa) * b_mm * d_mm
+
+
+def size_effect_factor(d_mm: float) -> float:
+    """Factor de tamaño λs (ACI 318-19 §22.5.5.1.3).
+
+        λs = √(2 / (1 + d/250)) ≤ 1.0
+    """
+    if d_mm <= 0:
+        return 1.0
+    return min(math.sqrt(2.0 / (1.0 + d_mm / 250.0)), 1.0)
+
+
+def vc_no_stirrups(
+    fc_mpa: float, lam: float, b_mm: float, d_mm: float, rho_w: float
+) -> float:
+    """Vc de un elemento SIN refuerzo transversal mínimo, en Newtons.
+
+    ACI 318-19 Tabla 22.5.5.1, caso Av < Av,min (sin Nu):
+        Vc = 0.66 · λs · λ · (ρw)^(1/3) · √f'c · bw · d
+    """
+    if fc_mpa <= 0 or b_mm <= 0 or d_mm <= 0 or rho_w <= 0:
+        return 0.0
+    return (0.66 * size_effect_factor(d_mm) * lam * rho_w ** (1.0 / 3.0)
+            * math.sqrt(fc_mpa) * b_mm * d_mm)
 
 
 def vs_max(fc_mpa: float, b_mm: float, d_mm: float) -> float:
@@ -96,6 +124,7 @@ class BeamShearDesign:
         stirrup_legs: int = 2,
         db_long_assumed_mm: float = 19.05,   # #6 por defecto (típico viga)
         lam: float = 1.0,
+        d_mm: float = 0.0,   # peralte efectivo real; 0 = estimarlo del db asumido
     ):
         self.vu_n = vu_n
         self.b_mm = b_mm
@@ -108,6 +137,7 @@ class BeamShearDesign:
         self.stirrup_legs = max(2, int(stirrup_legs))
         self.db_long_assumed_mm = db_long_assumed_mm
         self.lam = lam
+        self.d_override_mm = d_mm
 
     def _validate(self) -> Optional[str]:
         if self.b_mm <= 0 or self.h_mm <= 0:
@@ -121,10 +151,14 @@ class BeamShearDesign:
         return None
 
     def _d_effective_mm(self) -> float:
-        """Peralte efectivo asumido para cortante (consistente con flexión).
+        """Peralte efectivo para cortante.
 
+        Si se recibió el d real del diseño a flexión se usa ése, para que ambos
+        análisis de la misma viga sean coherentes. Si no, se estima:
         d ≈ h - r - db_estribo - db_long/2
         """
+        if self.d_override_mm > 0:
+            return self.d_override_mm
         d = (self.h_mm - self.cover_mm
              - self.stirrup_diameter_mm
              - self.db_long_assumed_mm / 2.0)
@@ -261,11 +295,17 @@ class SlabShearResult:
     fc_mpa: float
     lam: float
 
+    # Refuerzo longitudinal (entra en Vc por ACI 22.5.5.1)
+    as_long_mm2: float          # acero de flexión en la franja
+    rho_w: float                # cuantía usada en el cálculo
+    rho_w_assumed: bool         # True si se usó el mínimo por falta de dato
+    lambda_s: float             # factor de tamaño §22.5.5.1.3
+
     # Demanda y capacidad
     vu_kn: float
     vc_kn: float
     phi_vc_kn: float
-    ratio: float                # φVc / Vu
+    ratio: float                # φVc / Vu (inf si Vu = 0)
 
     # Estado
     status: str                 # "OK" o "AUMENTAR SECCIÓN"
@@ -284,6 +324,7 @@ class SlabShearCheck:
         fc_mpa: float,
         db_long_assumed_mm: float = 12.7,   # #4 típico en losa
         lam: float = 1.0,
+        as_long_mm2: float = 0.0,     # acero de flexión en la franja; 0 = desconocido
     ):
         self.vu_n = vu_n
         self.b_mm = b_mm
@@ -292,6 +333,7 @@ class SlabShearCheck:
         self.fc_mpa = fc_mpa
         self.db_long_assumed_mm = db_long_assumed_mm
         self.lam = lam
+        self.as_long_mm2 = max(as_long_mm2, 0.0)
 
     def _validate(self) -> Optional[str]:
         if self.b_mm <= 0 or self.h_mm <= 0:
@@ -314,7 +356,25 @@ class SlabShearCheck:
         err = self._validate()
 
         d_mm = self._d_effective_mm()
-        vc_n = vc_one_way(self.fc_mpa, self.lam, self.b_mm, d_mm)
+
+        # La losa no lleva estribos, así que Vc se calcula con la cuantía
+        # longitudinal y el factor de tamaño (ACI 318-19 Tabla 22.5.5.1,
+        # caso Av < Av,min), no con la forma simplificada 0.17·λ·√f'c.
+        rho_from_steel = (
+            self.as_long_mm2 / (self.b_mm * d_mm)
+            if self.b_mm > 0 and d_mm > 0 else 0.0
+        )
+        rho_assumed = rho_from_steel <= 0.0
+        rho_w = RHO_W_MIN_SLAB if rho_assumed else rho_from_steel
+        if rho_assumed:
+            warnings_list.append(
+                "No se conoce el acero longitudinal de la franja: se asumió "
+                f"ρw = {RHO_W_MIN_SLAB:.4f} (mínimo por retracción y temperatura, "
+                "ACI 24.4.3.2) para calcular Vc."
+            )
+
+        lam_s = size_effect_factor(d_mm)
+        vc_n = vc_no_stirrups(self.fc_mpa, self.lam, self.b_mm, d_mm, rho_w)
         phi_vc_n = PHI_SHEAR * vc_n
         ratio = (phi_vc_n / self.vu_n) if self.vu_n > 0 else float("inf")
 
@@ -338,10 +398,14 @@ class SlabShearCheck:
             d_mm=d_mm,
             fc_mpa=self.fc_mpa,
             lam=self.lam,
+            as_long_mm2=self.as_long_mm2,
+            rho_w=rho_w,
+            rho_w_assumed=rho_assumed,
+            lambda_s=lam_s,
             vu_kn=self.vu_n / 1000.0,
             vc_kn=vc_n / 1000.0,
             phi_vc_kn=phi_vc_n / 1000.0,
-            ratio=ratio if math.isfinite(ratio) else 0.0,
+            ratio=ratio,
             status=status,
             warnings=warnings_list,
         )

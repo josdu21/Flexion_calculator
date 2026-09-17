@@ -1,4 +1,4 @@
-# 🏗️ Calculadora de Acero (ACI 318-19)
+# 🏗️ Beam Calculator (ACI 318-19)
 
 Aplicación de escritorio para diseñar acero de refuerzo por **flexión, cortante y torsión** según ACI 318-19. Compatible con Windows y Linux.
 
@@ -10,28 +10,32 @@ Aplicación de escritorio para diseñar acero de refuerzo por **flexión, cortan
 - ✅ 3 sistemas de unidades: MKS (tonf, m), SI (kN, m), Inglés (kip, ft)
 - ✅ Cálculo de As requerido, As_min, As_max
 - ✅ Sugerencias automáticas de varillas ASTM
-- ✅ Memoria de cálculo HTML imprimible con fórmulas y referencias al ACI
+- ✅ Memoria de cálculo HTML imprimible, una por elemento, con fórmulas y referencias al ACI
+- ✅ Guardar y reabrir el estudio completo en un archivo `.json`
 - ✅ Interfaz CLI (sin dependencias)
 - ✅ Interfaz GUI con PyQt6 (opcional)
 - ✅ Compatible con Linux y Windows
 
 ## 🚀 Uso rápido
 
-### Desde el escritorio (Recomendado)
-- Busca **"Calculadora de Acero"** en tu menú de aplicaciones
-- Haz clic para ejecutar
+### Windows (Recomendado)
+Instala con `BeamCalculator-Setup-<version>.exe` (ver [Releases](https://github.com/josdu21/Flexion_calculator/releases))
+y busca **"Beam Calculator"** en el menú Inicio.
 
 ### Desde terminal (CLI - Sin instalar nada)
 ```bash
-cd ~/Projects/Flexion_calculator
 python main_cli.py
 ```
 
 ### Desde terminal (GUI con PyQt6)
 ```bash
-cd ~/Projects/Flexion_calculator
-chmod +x ejecutar.sh
-./ejecutar.sh
+python main.py
+```
+
+En Linux, `packaging/ejecutar.sh` instala PyQt6 si falta y luego abre la GUI:
+```bash
+chmod +x packaging/ejecutar.sh
+./packaging/ejecutar.sh
 ```
 
 ## Interfaz de diseño
@@ -45,7 +49,16 @@ chmod +x ejecutar.sh
 - Estado, advertencias y refuerzo de diseño aparecen primero. Las comprobaciones
   intermedias se despliegan bajo demanda; la casilla **Incluir torsión · Tu** está
   debajo de Vu en **Viga · Cortante / torsión**, visible sin desplazarse.
-- **Exportar memoria** (`Ctrl+E`) guarda el análisis activo. Cancelar cierra el diálogo.
+- **Datos del proyecto** (`Ctrl+I`) define lo que va en el cajetín de la memoria:
+  proyecto, diseñador, revisor, revisión, notas y el nombre de cada elemento.
+  La fecha, el tipo de elemento y la norma se generan solos.
+- **Guardar** (`Ctrl+S`) y **Abrir** (`Ctrl+O`) trabajan sobre un `.json` que
+  contiene el estudio completo: los cuatro análisis, los datos del cajetín y el
+  sistema de unidades. Las magnitudes se guardan en SI, así que un estudio
+  hecho en unidades inglesas se abre sin problema en MKS o SI.
+- **Exportar memoria** (`Ctrl+E`) guarda una sola memoria por elemento: la de viga
+  cubre flexión, cortante y torsión; la de losa, flexión y cortante. Da igual
+  desde qué pestaña del elemento se exporte. Cancelar cierra el diálogo.
 - El resumen se apila automáticamente al reducir la ventana (mínimo 960 × 640).
 
 Pruebas de los flujos de interfaz (requieren PyQt6):
@@ -59,18 +72,21 @@ python -m unittest discover -s tests -v
 ### Linux (Arch/CachyOS)
 ```bash
 sudo pacman -S python-pyqt6
-cd ~/Projects/Flexion_calculator
 python main.py
 ```
 
 ### Linux (Debian/Ubuntu)
 ```bash
 sudo apt install python3-pyqt6
-python3 ~/Projects/Flexion_calculator/main.py
+python3 main.py
 ```
 
 ### Windows
-```bash
+Con el instalador (no requiere Python):
+descarga `BeamCalculator-Setup-<version>.exe` desde Releases y ejecútalo.
+
+Desde el código fuente:
+```cmd
 pip install PyQt6
 python main.py
 ```
@@ -95,29 +111,44 @@ Sugerencias:       5 × #5 (9.90 cm²)
 ## 📂 Estructura
 
 ```
-flexion_calculator/
+Beam_calculator/
 ├── main.py               # GUI PyQt6
 ├── main_cli.py           # CLI (sin dependencias)
-├── ejecutar.sh           # Script de ejecución
 │
 ├── core/
 │   ├── flexion.py       # Motor de flexión ACI 318-19
 │   ├── shear.py         # Motor de cortante (viga y losa)
 │   ├── torsion.py       # Motor de torsión + combinación V/T
 │   ├── report.py        # Memoria de cálculo HTML
+│   ├── project.py       # Estudio guardable (.json) y datos del cajetín
 │   ├── units.py         # Conversión de unidades
-│   └── bar_tables.py    # Varillas ASTM
+│   ├── bar_tables.py    # Varillas ASTM
 │
 ├── ui/
 │   ├── main_window.py         # Ventana principal
 │   ├── input_panel.py         # Entradas de flexión
 │   ├── results_panel.py       # Resultados de flexión
 │   ├── shear_input_panel.py   # Entradas de cortante y torsión
-│   └── shear_results_panel.py # Resultados de cortante y torsión
+│   ├── shear_results_panel.py # Resultados de cortante y torsión
+│   ├── stress_diagram.py      # Diagrama de esfuerzos
+│   ├── project_dialog.py      # Datos del cajetín
+│   ├── form_helpers.py        # Widgets compartidos de formulario
+│   └── theme.py               # Paleta y estilos
 │
-├── requirements.txt     # Dependencias
-└── README.md           # Este archivo
+│   └── version.py       # Nombre y versión de la app
+│
+├── assets/icon.ico       # Ícono (regenerable con packaging/make_icon.py)
+├── tests/                # Pruebas de los flujos de interfaz
+├── packaging/            # Build, instalador y lanzadores Linux
+│
+├── requirements.txt      # Dependencias de la app
+├── requirements-dev.txt  # Dependencias de build (Nuitka, Pillow)
+├── CHANGELOG.md          # Registro de cambios por versión
+└── README.md             # Este archivo
 ```
+
+El build genera `distro/`: la carpeta `BeamCalculator/` con la app y el
+instalador `BeamCalculator-Setup-<version>.exe`.
 
 ## 🧮 Fórmulas ACI 318-19
 
@@ -158,7 +189,7 @@ flexion_calculator/
 - O instala PyQt6 manualmente
 
 **Permisos denegados (Linux)**
-- Ejecuta: `chmod +x ejecutar.sh`
+- Ejecuta: `chmod +x packaging/ejecutar.sh`
 
 ## 📋 Varillas ASTM soportadas
 
@@ -166,11 +197,12 @@ flexion_calculator/
 
 ## 🎯 Próximos pasos (opcional)
 
-1. **Crear ejecutable Windows:**
-   ```bash
-   pip install pyinstaller
-   pyinstaller --onefile --windowed main.py
+1. **Crear instalador Windows:**
+   ```cmd
+   packaging\build_nuitka.bat
+   iscc packaging\installer.iss
    ```
+   Ver `packaging/README.md` para más detalle (requiere Inno Setup instalado aparte).
 
 2. **Mejoras futuras:**
    - Diseño a compresión
@@ -180,18 +212,14 @@ flexion_calculator/
 
 ## 📝 Requisitos del sistema
 
-- Python 3.7+
+- Python 3.7+ (no hace falta si usas el instalador de Windows)
 - PyQt6 6.4.0+ (solo para GUI)
-- 50 MB de espacio en disco
+- ~75 MB de espacio en disco
 
 ## 📄 Licencia
 
-Proyecto educativo. Libre para usar y modificar.
+MIT — ver [LICENSE](LICENSE).
 
 ## 📧 Contacto
 
 josdu2121@gmail.com
-
----
-
-**¡Listo para usar! Ejecuta `./ejecutar.sh` desde el directorio del proyecto o busca la aplicación en tu menú.**

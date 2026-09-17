@@ -49,20 +49,23 @@ class InterfaceWorkflows(unittest.TestCase):
         w = self.window
         self.assertEqual(len(w.findChildren(QTabWidget)), 1)
         contexts = ((True, True), (True, False), (False, True), (False, False))
+        # El cortante toma el d (viga) y el As (losa) del diseño a flexión, así
+        # que se compara contra el mismo helper que usa la ventana.
         analyses = (
-            (w.beam_flex_inputs, w.beam_flex_results, lambda v: BeamSection(**v).design()),
-            (w.beam_shear_inputs, w.beam_shear_results, lambda v: BeamShearTorsionDesign(**v).design()),
-            (w.slab_flex_inputs, w.slab_flex_results, lambda v: BeamSection(**v).design()),
-            (w.slab_shear_inputs, w.slab_shear_results, lambda v: SlabShearCheck(**v).check()),
+            (w.beam_flex_results, w._beam_flex_design),
+            (w.beam_shear_results, w._beam_shear_design),
+            (w.slab_flex_results, w._slab_flex_design),
+            (w.slab_shear_results, w._slab_shear_check),
         )
         for system in UnitSystem:
             w.unit_combo.setCurrentIndex(w.unit_combo.findData(system))
-            for index, (inputs, results, calculate) in enumerate(analyses):
+            for index, (results, calculate) in enumerate(analyses):
                 w.tabs.setCurrentIndex(index)
                 self.app.processEvents()
                 self.assertEqual(w._active_context(), contexts[index])
-                self.assertEqual(results.result, calculate(inputs.get_values()))
-                self.assertIn(w.tabs.tabText(index), w.report_button.toolTip())
+                self.assertEqual(results.result, calculate())
+                elemento = "Viga" if contexts[index][0] else "Losa"
+                self.assertIn(elemento, w.report_button.toolTip())
             # Las conexiones se renuevan después de reconstruir los campos.
             w.beam_flex_inputs.h_spinbox.setValue(25)
             self.assertEqual(w.beam_shear_inputs.h_spinbox.value(), 25)
@@ -153,29 +156,75 @@ class InterfaceWorkflows(unittest.TestCase):
                 self.assertLessEqual(scroll.widget().minimumSizeHint().width(),
                                      scroll.viewport().width())
 
-    def test_export_uses_active_analysis_and_cancel_does_nothing(self):
+    def _export_to(self, folder, name):
+        destination = Path(folder) / name
+        with patch('ui.main_window.QFileDialog.getSaveFileName',
+                   return_value=(str(destination), '')), \
+             patch('ui.main_window.webbrowser.open') as browser:
+            self.window._export_report()
+        browser.assert_called_once()
+        self.assertTrue(destination.exists())
+        return destination.read_text(encoding='utf-8')
+
+    def test_export_produces_one_report_per_element(self):
         w = self.window
         # TemporaryDirectory usa modo 0700, que en algunos entornos aislados de
         # Windows produce una ACL inaccesible para el mismo proceso de prueba.
         folder = Path(tempfile.gettempdir()) / f'beam-calculator-{uuid4().hex}'
         folder.mkdir()
         try:
-            for index in range(4):
+            w.beam_shear_inputs.torsion_group.setChecked(True)
+            # Ambas pestañas de un elemento exportan la MISMA memoria.
+            for index, name in ((0, 'viga_a.html'), (1, 'viga_b.html')):
                 w.tabs.setCurrentIndex(index)
-                destination = folder / f'report_{index}.html'
-                with patch('ui.main_window.QFileDialog.getSaveFileName', return_value=(str(destination), '')), \
-                     patch('ui.main_window.webbrowser.open') as browser:
-                    w._export_report()
-                self.assertTrue(destination.exists())
-                self.assertIn('<html', destination.read_text(encoding='utf-8').lower())
-                browser.assert_called_once()
-            with patch('ui.main_window.QFileDialog.getSaveFileName', return_value=('', '')), \
-                 patch('ui.main_window.webbrowser.open') as browser:
-                w._export_report()
-                browser.assert_not_called()
+                html = self._export_to(folder, name)
+                for heading in ('Cálculos de diseño (flexión)',
+                                'Cálculos de diseño (cortante)',
+                                'Cálculos de diseño (torsión)',
+                                'Resumen del diseño'):
+                    self.assertIn(heading, html, f'falta "{heading}" en {name}')
+                self.assertEqual(html.count('</html>'), 1)
+
+            for index, name in ((2, 'losa_a.html'), (3, 'losa_b.html')):
+                w.tabs.setCurrentIndex(index)
+                html = self._export_to(folder, name)
+                for heading in ('Cálculos de diseño (flexión)',
+                                'Revisión por cortante',
+                                'Resumen del diseño'):
+                    self.assertIn(heading, html, f'falta "{heading}" en {name}')
+                self.assertNotIn('torsión)', html)
+                self.assertEqual(html.count('</html>'), 1)
+
             self.assertEqual(len(list(folder.iterdir())), 4)
         finally:
             shutil.rmtree(folder)
+
+    def test_export_cancel_does_nothing(self):
+        with patch('ui.main_window.QFileDialog.getSaveFileName', return_value=('', '')), \
+             patch('ui.main_window.webbrowser.open') as browser:
+            self.window._export_report()
+            browser.assert_not_called()
+
+    def test_shear_uses_the_effective_depth_from_flexure(self):
+        w = self.window
+        w.tabs.setCurrentIndex(0)
+        w.beam_flex_inputs.layer_bar_spins[0].setValue(5)
+        self.app.processEvents()
+        self.assertAlmostEqual(w.beam_shear_results.result.d_mm,
+                               w.beam_flex_results.result.d_mm, places=6)
+
+    def test_slab_shear_uses_the_flexural_reinforcement_in_vc(self):
+        w = self.window
+        w.tabs.setCurrentIndex(2)
+        before = w.slab_shear_results.result
+        self.assertFalse(before.rho_w_assumed)
+        w.slab_flex_inputs.layer_bar_spins[0].setValue(
+            w.slab_flex_inputs.layer_bar_spins[0].value() + 3)
+        self.app.processEvents()
+        after = w.slab_shear_results.result
+        # Más acero longitudinal ⇒ mayor ρw ⇒ mayor Vc (ACI 22.5.5.1).
+        self.assertGreater(after.rho_w, before.rho_w)
+        self.assertGreater(after.vc_kn, before.vc_kn)
 
 
 if __name__ == '__main__':

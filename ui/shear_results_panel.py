@@ -365,7 +365,10 @@ class ShearResultsPanel(QWidget):
         self.torsion_regime_label.setText(regime)
 
         self.phi_tn_label.setText(_moment_in_user_unit(result.phi_tn_knm, cv))
-        self.torsion_ratio_label.setText(f"{result.torsion_ratio:.2f}")
+        self.torsion_ratio_label.setText(
+            "∞" if result.torsion_ratio == float("inf")
+            else f"{result.torsion_ratio:.2f}"
+        )
         self._paint_ratio(self.torsion_ratio_label, result.torsion_ratio)
 
         # Interacción de la sección

@@ -173,7 +173,7 @@ def main():
                 main()
                 return
             elif again in ["n", "no"]:
-                print("\n¡Gracias por usar la Calculadora de Acero por Flexión!")
+                print("\n¡Gracias por usar Beam Calculator!")
                 return
             else:
                 print("Ingresa 's' para sí o 'n' para no.")
