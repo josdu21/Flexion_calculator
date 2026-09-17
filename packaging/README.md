@@ -15,20 +15,31 @@ Uso:
 ./packaging/ejecutar.sh   # cada vez que quieras abrir la app
 ```
 
-## Para build de Windows .exe
+## Para build de Windows (Nuitka + instalador)
 
 | Archivo | Para qué sirve |
 |---|---|
-| `flexion_calculator.spec` | Configuración de PyInstaller (incluye exclusiones para reducir tamaño). |
-| `build.bat` | Script de Windows: instala dependencias y genera `dist\FlexionCalculator.exe`. |
+| `build_nuitka.bat` | Script de Windows: instala dependencias y genera `distro\BeamCalculator\BeamCalculator.exe` (carpeta standalone con Nuitka). |
+| `installer.iss` | Script de Inno Setup: empaqueta esa carpeta en `BeamCalculator-Setup-<version>.exe`. |
+| `version.txt` | Versión de la app (una línea, ej. `1.0.0`), usada por ambos scripts. |
+
+Requiere **Inno Setup** instalado aparte (no es un paquete de pip):
+descargalo de https://jrsoftware.org/isdl.php o instalalo con
+`choco install innosetup`.
 
 Uso en Windows (con Python ya instalado):
 ```cmd
-packaging\build.bat
+packaging\build_nuitka.bat
+iscc packaging\installer.iss
 ```
 
-El binario portable queda en `dist\FlexionCalculator.exe` (~80 MB).
-Copialo a cualquier máquina Windows y ejecutalo — no requiere instalación.
+El instalador queda en `distro\BeamCalculator-Setup-<version>.exe`. Al
+ejecutarlo, la app se instala en Program Files con acceso desde el menú
+Inicio (y, opcionalmente, un ícono en el escritorio), con desinstalador
+registrado en "Aplicaciones".
+
+Si más adelante agregas un ícono en `assets\icon.ico`, ambos scripts lo
+toman automáticamente en el siguiente build — no hace falta editarlos.
 
 ## Build automático (CI)
 

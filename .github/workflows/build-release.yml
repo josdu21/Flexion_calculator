@@ -23,16 +23,42 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Build executable
-        run: pyinstaller packaging/flexion_calculator.spec --clean --noconfirm
+      # Si el tag y la versión del código difieren, se publicaría un instalador
+      # con un número que no corresponde. Mejor fallar acá.
+      - name: Check the tag matches the declared version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          declarada=$(python -c "from core.version import __version__; print(__version__)")
+          etiqueta="${GITHUB_REF_NAME#v}"
+          echo "tag=$etiqueta  core/version.py=$declarada"
+          if [ "$declarada" != "$etiqueta" ]; then
+            echo "::error::El tag $GITHUB_REF_NAME no coincide con la versión $declarada"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Build standalone executable
+        run: packaging\build_nuitka.bat
+        shell: cmd
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build installer
+        run: iscc packaging\installer.iss
+        shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FlexionCalculator-windows
-          path: dist/FlexionCalculator.exe
+          name: BeamCalculator-windows-setup
+          # El instalador ya lleva la versión en el nombre.
+          path: distro/BeamCalculator-Setup-*.exe
           if-no-files-found: error
 
   release:
@@ -48,11 +74,10 @@ jobs:
         with:
           path: artifacts
 
-      - name: Rename binary for release
+      - name: Collect installer
         run: |
           mkdir release
-          cp artifacts/FlexionCalculator-windows/FlexionCalculator.exe \
-             release/FlexionCalculator-${{ github.ref_name }}-windows.exe
+          cp artifacts/BeamCalculator-windows-setup/BeamCalculator-Setup-*.exe release/
           ls -lh release/
 
       - name: Create release
@@ -60,13 +85,20 @@ jobs:
         with:
           files: release/*
           generate_release_notes: true
-          name: Release ${{ github.ref_name }}
+          name: Beam Calculator ${{ github.ref_name }}
           body: |
-            ## 📦 Calculadora de Acero por Flexión ${{ github.ref_name }}
+            ## 📦 Beam Calculator ${{ github.ref_name }}
 
-            Diseño por flexión según ACI 318-19.
+            Diseño de refuerzo por flexión, cortante y torsión según ACI 318-19.
 
-            ### Descarga
+            Los cambios de esta versión están en
+            [CHANGELOG.md](https://github.com/josdu21/Flexion_calculator/blob/${{ github.ref_name }}/CHANGELOG.md).
 
-            **Windows**: `FlexionCalculator-${{ github.ref_name }}-windows.exe`
-            Portable — doble clic para ejecutar, sin instalación.
+            ### Instalación
+
+            Descarga `BeamCalculator-Setup-*.exe` y ejecútalo. Queda instalado en
+            Program Files con acceso desde el menú Inicio (y, si lo eliges, un
+            acceso directo en el escritorio). Incluye desinstalador.
+
+            Si ya tenías una versión anterior, el instalador **la actualiza en
+            sitio**: no hace falta desinstalarla antes.
