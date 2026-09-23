@@ -4,8 +4,13 @@ Sirve a las dos normas: el bloque rectangular equivalente tiene la misma forma
 en ACI 318-19 y en AASHTO LRFD, y sólo cambia el esfuerzo uniforme (0.85·f'c en
 ACI; α₁·f'c en AASHTO, que baja por encima de 70 MPa).
 
+Dibuja la forma real de la sección: rectangular, T o L. Con ala, el bloque de
+compresión se dibuja sobre el ancho que realmente comprime —el ala mientras
+quepa en ella, y ala más alma cuando el eje neutro baja al alma—, que es lo
+que distingue a una T de una rectangular a simple vista.
+
 Muestra:
-- Sección transversal (b × h)
+- Sección transversal (b × h, o b_f/b_w × h con ala)
 - Bloque de compresión (área a = β₁·c)
 - Eje neutro
 - Acero de tensión (As)
@@ -24,6 +29,7 @@ from PyQt6.QtGui import (
 
 from core.design_code import code_of, spec
 from core.flexion import FlexionDesignResult
+from core.section_geometry import SectionProfile, SectionShape
 from core.units import UnitSystem, get_converter
 from ui.theme import PALETTE
 
@@ -90,20 +96,31 @@ class StressDiagramWidget(QWidget):
         section_panel_w = available_w * 0.42
         stress_panel_w = available_w * 0.58
 
-        avail_h = H - 2 * margin - 50
+        # Debajo de la sección van, en este orden: la etiqueta de A_s, la
+        # cota del ancho con su rótulo y el pie del dibujo. Reservarles poco
+        # hacía que la cota se montara sobre el pie en secciones altas.
+        avail_h = H - 2 * margin - 80
 
-        scale_h = avail_h
         h_mm = max(r.h_mm, 1.0)
-        scale = scale_h / h_mm
+        perfil = SectionProfile.create(
+            shape=getattr(r, "section_shape", SectionShape.RECTANGULAR),
+            bw_mm=r.b_mm, h_mm=r.h_mm,
+            bf_mm=getattr(r, "bf_mm", 0.0), hf_mm=getattr(r, "hf_mm", 0.0),
+        )
+        # Un ala ancha no cabe a la escala del peralte: se toma la escala que
+        # deja entrar la sección completa, para que el dibujo siga siendo
+        # proporcional en vez de recortado.
+        ancho_mm = max(perfil.bf_mm, perfil.bw_mm, 1.0)
+        scale = min(avail_h / h_mm, (section_panel_w - 40) / ancho_mm)
 
-        b_px = min(r.b_mm * scale, section_panel_w - 40)
+        b_px = ancho_mm * scale
         h_px = h_mm * scale
 
         sec_x = margin + (section_panel_w - b_px) / 2
         sec_y = margin + 10
 
         # 1) Sección de concreto
-        self._draw_section(painter, sec_x, sec_y, b_px, h_px, scale, r)
+        self._draw_section(painter, sec_x, sec_y, b_px, h_px, scale, r, perfil)
 
         # 2) Diagrama de esfuerzos
         diag_x = margin + section_panel_w + gap_between
@@ -122,18 +139,43 @@ class StressDiagramWidget(QWidget):
         )
 
     def _draw_section(self, p: QPainter, x: float, y: float, b_px: float, h_px: float,
-                       scale: float, r: FlexionDesignResult):
+                       scale: float, r: FlexionDesignResult,
+                       perfil: SectionProfile):
+        """Dibuja la sección de concreto, el bloque comprimido y el armado.
+
+        ``x`` es el borde izquierdo del contorno más ancho (el ala si la hay) y
+        ``b_px`` su ancho. El alma se ubica adentro: centrada en la T, pegada a
+        la izquierda en la L.
+        """
+        bw_px = perfil.bw_mm * scale
+        hf_px = perfil.hf_mm * scale
+        # Dónde arranca el alma dentro del contorno del ala.
+        if perfil.shape is SectionShape.T:
+            web_x = x + (b_px - bw_px) / 2.0
+        else:
+            # Rectangular (b_px == bw_px) y L, con el ala volando a la derecha.
+            web_x = x
+
         # Concreto
         p.setPen(QPen(_qc(PALETTE.concrete_edge), 1.5))
         p.setBrush(QBrush(_qc(PALETTE.concrete)))
-        p.drawRect(QRectF(x, y, b_px, h_px))
+        if perfil.is_flanged:
+            p.drawPolygon(self._section_outline(x, y, b_px, h_px, bw_px,
+                                                hf_px, web_x))
+        else:
+            p.drawRect(QRectF(x, y, b_px, h_px))
 
-        # Bloque de Whitney (área de compresión)
+        # Bloque de Whitney: mientras cabe en el ala ocupa todo su ancho; si el
+        # eje neutro baja al alma, el sobrante se dibuja sólo sobre el alma.
         a_px = min(r.a_mm * scale, h_px)
         if a_px > 0:
             p.setPen(QPen(_qc(PALETTE.compression), 1.2))
             p.setBrush(QBrush(_qc(PALETTE.compression, 170)))
-            p.drawRect(QRectF(x, y, b_px, a_px))
+            if perfil.is_flanged and a_px > hf_px:
+                p.drawRect(QRectF(x, y, b_px, hf_px))
+                p.drawRect(QRectF(web_x, y + hf_px, bw_px, a_px - hf_px))
+            else:
+                p.drawRect(QRectF(x, y, b_px, a_px))
 
         # Eje neutro
         c_px = min(r.c_mm * scale, h_px)
@@ -146,7 +188,8 @@ class StressDiagramWidget(QWidget):
             p.setFont(QFont("Sans", 8, QFont.Weight.Bold))
             p.drawText(QPointF(x + b_px + 10, y + c_px + 3), "E.N.")
 
-        # Acero de tensión: dibujar lechos reales según configuración
+        # Acero de tensión: dibujar lechos reales según configuración.
+        # Las barras van en el alma, no en el ala.
         cv = get_converter(self.unit_system)
         p.setPen(QPen(_qc(PALETTE.steel), 1.5))
         p.setBrush(QBrush(_qc(PALETTE.steel)))
@@ -160,23 +203,23 @@ class StressDiagramWidget(QWidget):
                 n = layer.n_bars
                 # Radio visual proporcional al db
                 bar_radius = max(3, min(10, layer.bar_diameter_mm * scale * 0.5))
-                # Espaciado: distribuir n barras dentro de b_px con recubrimiento
+                # Espaciado: distribuir n barras dentro del alma con recubrimiento
                 cover_px = (self.result.cover_mm + r.reinforcement.stirrup_diameter_mm) * scale
-                avail_w = b_px - 2 * cover_px - 2 * bar_radius
+                avail_w = bw_px - 2 * cover_px - 2 * bar_radius
                 if n > 1:
                     step = avail_w / (n - 1)
                     for i in range(n):
-                        cx = x + cover_px + bar_radius + i * step
+                        cx = web_x + cover_px + bar_radius + i * step
                         p.drawEllipse(QPointF(cx, layer_y_px), bar_radius, bar_radius)
                 else:
-                    cx = x + b_px / 2
+                    cx = web_x + bw_px / 2
                     p.drawEllipse(QPointF(cx, layer_y_px), bar_radius, bar_radius)
         else:
             # Fallback genérico
             d_px = r.d_mm * scale
             steel_y = y + d_px
             for i in range(4):
-                cx = x + (i + 1) * (b_px / 5)
+                cx = web_x + (i + 1) * (bw_px / 5)
                 p.drawEllipse(QPointF(cx, steel_y), 5, 5)
 
         # Etiqueta As
@@ -202,16 +245,49 @@ class StressDiagramWidget(QWidget):
             cv.format_length(r.h_mm, decimals=1) + "  (h)"
         )
 
-        # Cota del ancho b
+        # Cota del ancho: con ala se acotan los dos, b_f arriba y b_w abajo.
         p.setPen(QPen(_qc(PALETTE.dim_lines), 1))
         p.setFont(QFont("Sans", 8))
-        dim_y = y + h_px + 28
-        p.drawLine(QPointF(x, dim_y), QPointF(x + b_px, dim_y))
+        if perfil.is_flanged:
+            self._draw_width_dim(p, x, b_px, y - 12,
+                                 cv.format_length(perfil.bf_mm, decimals=1) + " (b_f)",
+                                 texto_arriba=True)
+            self._draw_width_dim(p, web_x, bw_px, y + h_px + 28,
+                                 cv.format_length(perfil.bw_mm, decimals=1) + " (b_w)")
+        else:
+            self._draw_width_dim(p, x, b_px, y + h_px + 28,
+                                 cv.format_length(r.b_mm, decimals=1) + " (b)")
+
+    @staticmethod
+    def _section_outline(x: float, y: float, b_px: float, h_px: float,
+                          bw_px: float, hf_px: float,
+                          web_x: float) -> QPolygonF:
+        """Contorno de la sección con ala, recorrido en sentido horario."""
+        return QPolygonF([
+            QPointF(x, y),                            # esquina superior izquierda del ala
+            QPointF(x + b_px, y),                     # superior derecha del ala
+            QPointF(x + b_px, y + hf_px),             # baja por el borde del ala
+            QPointF(web_x + bw_px, y + hf_px),        # entra hacia el alma
+            QPointF(web_x + bw_px, y + h_px),         # baja por el alma
+            QPointF(web_x, y + h_px),                 # fondo del alma
+            QPointF(web_x, y + hf_px),                # sube por el alma
+            QPointF(x, y + hf_px),                    # vuelve al borde del ala
+        ])
+
+    def _draw_width_dim(self, p: QPainter, x: float, ancho_px: float,
+                         dim_y: float, texto: str, texto_arriba: bool = False):
+        """Cota horizontal con sus dos marcas de extremo y el rótulo."""
+        p.setPen(QPen(_qc(PALETTE.dim_lines), 1))
+        p.drawLine(QPointF(x, dim_y), QPointF(x + ancho_px, dim_y))
         p.drawLine(QPointF(x, dim_y - 4), QPointF(x, dim_y + 4))
-        p.drawLine(QPointF(x + b_px, dim_y - 4), QPointF(x + b_px, dim_y + 4))
-        b_text = cv.format_length(r.b_mm, decimals=1) + " (b)"
-        p.drawText(QRectF(x, dim_y + 4, b_px, 14),
-                   int(Qt.AlignmentFlag.AlignCenter), b_text)
+        p.drawLine(QPointF(x + ancho_px, dim_y - 4), QPointF(x + ancho_px, dim_y + 4))
+        caja_y = dim_y - 18 if texto_arriba else dim_y + 4
+        # Un alma angosta deja una caja más corta que el rótulo: se centra en
+        # la cota pero se le da ancho propio para que no se recorte.
+        ancho_texto = max(ancho_px, 120.0)
+        p.drawText(QRectF(x + (ancho_px - ancho_texto) / 2.0, caja_y,
+                          ancho_texto, 14),
+                   int(Qt.AlignmentFlag.AlignCenter), texto)
 
     def _draw_stress_blocks(self, p: QPainter, x: float, y: float, w: float,
                              h_px: float, scale: float, r: FlexionDesignResult):

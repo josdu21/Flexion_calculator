@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt
 
 from core.design_code import DesignCode, code_of
 from core.flexion import FlexionDesignResult
+from core.section_geometry import SectionShape
 from core.units import get_converter, UnitSystem
 from ui.stress_diagram import StressDiagramWidget
 from ui.theme import PALETTE, alpha
@@ -176,6 +177,29 @@ class ResultsPanel(QWidget):
         forces_layout.addWidget(self.rho_label, 2, 1)
         forces_group.setLayout(forces_layout)
 
+        # Propio de las secciones con ala: oculto en rectangular, donde no hay
+        # nada que decir que no esté ya en la geometría.
+        self.flange_group = QGroupBox("Sección con ala")
+        flange_layout = QGridLayout()
+        flange_layout.setVerticalSpacing(5)
+        self.shape_label = self._make_value_label("—")
+        self.bf_label = self._make_value_label("—")
+        self.hf_label = self._make_value_label("—")
+        self.flange_mode_label = self._make_value_label("—")
+        self.asf_label = self._make_value_label("—")
+        self.bf_max_label = self._make_value_label("—")
+        for fila, (texto, widget) in enumerate((
+            ("Forma:", self.shape_label),
+            ("Ancho del ala b_f:", self.bf_label),
+            ("Espesor del ala h_f:", self.hf_label),
+            ("Trabaja como:", self.flange_mode_label),
+            ("A_sf (voladizos del ala):", self.asf_label),
+            ("b_f máx. por h_f:", self.bf_max_label),
+        )):
+            flange_layout.addWidget(QLabel(texto), fila, 0)
+            flange_layout.addWidget(widget, fila, 1)
+        self.flange_group.setLayout(flange_layout)
+
         # Propio de AASHTO: φ variable, refuerzo mínimo por momento y fisuración.
         # Oculto bajo ACI, donde ninguno de estos valores existe.
         self.aashto_group = QGroupBox("AASHTO LRFD")
@@ -204,7 +228,8 @@ class ResultsPanel(QWidget):
         main_layout.addWidget(diagram_group)
         self.details = DetailsSection(
             "Comprobaciones y valores intermedios",
-            spacing_group, geom_group, forces_group, self.aashto_group,
+            spacing_group, geom_group, self.flange_group, forces_group,
+            self.aashto_group,
         )
         main_layout.addWidget(self.details)
 
@@ -302,6 +327,7 @@ class ResultsPanel(QWidget):
         )
 
         # Bloque propio de AASHTO
+        self._display_flange(result, cv)
         self._display_aashto(result, cv)
 
         # Estado
@@ -317,6 +343,34 @@ class ResultsPanel(QWidget):
 
         # Diagrama
         self.diagram.set_result(result, self.unit_system)
+
+    def _display_flange(self, result, cv):
+        """Grupo de la sección con ala; en rectangular se oculta entero."""
+        forma = getattr(result, "section_shape", SectionShape.RECTANGULAR)
+        con_ala = forma is not SectionShape.RECTANGULAR
+        self.flange_group.setVisible(con_ala)
+        if not con_ala:
+            return
+
+        def largo(mm: float) -> str:
+            return cv.format_length(mm / 1000.0 / cv.length_to_m,
+                                    cv.decimals_length)
+
+        self.shape_label.setText(forma.value)
+        self.bf_label.setText(largo(result.bf_mm))
+        self.hf_label.setText(largo(result.hf_mm))
+        if result.flanged_behaviour:
+            self.flange_mode_label.setText("Sección T (el bloque entra al alma)")
+            self.asf_label.setText(f"{result.asf_cm2:.2f} cm²")
+        else:
+            # El bloque no sale del ala: resiste como rectangular de ancho b_f.
+            self.flange_mode_label.setText("Rectangular de ancho b_f")
+            self.asf_label.setText("no aplica")
+        excede = result.bf_mm > result.bf_max_mm
+        self.bf_max_label.setText(largo(result.bf_max_mm))
+        self.bf_max_label.setStyleSheet(
+            f"color: {PALETTE.error}; font-weight: bold;" if excede else ""
+        )
 
     def _display_aashto(self, result, cv):
         """Llena (o esconde) los valores que sólo existen bajo AASHTO."""

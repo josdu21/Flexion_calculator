@@ -171,6 +171,33 @@ class StudyFile(unittest.TestCase):
         self._open_from(destino)
         self.assertEqual(self.window.current_code, DesignCode.ACI_318_19)
 
+    def test_a_v2_file_opens_as_a_rectangular_beam(self):
+        # Los estudios guardados con la 2.1.0 no traen forma de sección: la
+        # viga rectangular era la única que existía.
+        import json
+        from core.section_geometry import SectionShape
+        destino = self.folder / "v2.json"
+        self.window.beam_flex_inputs.shape_combo.setCurrentIndex(
+            self.window.beam_flex_inputs.shape_combo.findData(SectionShape.T)
+        )
+        save_study(destino, Study(
+            info=ProjectInfo(project="Obra 2.1"),
+            panels={k: p.get_state() for k, p in self.window._panels().items()},
+        ))
+        data = json.loads(destino.read_text(encoding='utf-8'))
+        data["version"] = 2
+        for panel in data["paneles"].values():
+            panel.pop("section_shape", None)
+            panel.pop("bf_mm", None)
+            panel.pop("hf_mm", None)
+        destino.write_text(json.dumps(data), encoding='utf-8')
+
+        self._open_from(destino)
+        self.assertIs(
+            self.window.beam_flex_inputs.section_shape(),
+            SectionShape.RECTANGULAR,
+        )
+
     def test_a_file_from_a_newer_version_is_refused(self):
         import json
         destino = self.folder / "nuevo.json"

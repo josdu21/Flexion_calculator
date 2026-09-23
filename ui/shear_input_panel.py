@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
 from core.design_code import DEFAULT_CODE, DesignCode
+from core.section_geometry import SectionShape
 from ui.form_helpers import scroll_form, set_si, set_choice
 
 
@@ -105,9 +106,29 @@ class BeamShearInputPanel(QWidget):
         super().__init__()
         self.unit_system = unit_system
         self.design_code = design_code
+        self.section_shape = SectionShape.RECTANGULAR
         self._building = True
         self._build_ui()
         self._building = False
+
+    def _apply_section_note(self):
+        """Refleja la forma elegida en flexión, que acá sólo se informa."""
+        if self.section_shape is SectionShape.RECTANGULAR:
+            self.shape_note.setText(
+                "Sección rectangular. El tipo de sección se elige en la "
+                "pestaña de flexión."
+            )
+        else:
+            self.shape_note.setText(
+                f"Sección «{self.section_shape.value}» definida en flexión: "
+                "«b» es el ancho del alma b_w, que es el que rige el cortante. "
+                "El ala entra sólo en A_cp de torsión."
+            )
+
+    def set_section_shape(self, shape: SectionShape):
+        """La pestaña de flexión avisa con qué forma se está calculando."""
+        self.section_shape = shape
+        self._apply_section_note()
 
     def _build_ui(self):
         cv = get_converter(self.unit_system)
@@ -202,6 +223,15 @@ class BeamShearInputPanel(QWidget):
             decimals=cv.decimals_length, step=cover_step,
         )
         _add_field(geom_layout, 2, "Recubrimiento", cv.length_unit, self.cover_spinbox)
+
+        # La forma de la sección se elige una sola vez, en flexión. Acá sólo se
+        # informa, porque cambia el significado de "b" y el A_cp de torsión.
+        self.shape_note = QLabel()
+        self.shape_note.setObjectName("infoLabel")
+        self.shape_note.setWordWrap(True)
+        geom_layout.addWidget(self.shape_note, 3, 0, 1, 3)
+        self._apply_section_note()
+
         geom_group.setLayout(geom_layout)
 
         # Materiales

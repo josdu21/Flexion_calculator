@@ -33,6 +33,7 @@ class DesignCode(Enum):
 _ACI_FLEX_KEYS = frozenset({
     "mu_nmm", "b_mm", "h_mm", "cover_mm", "fc_mpa", "fy_mpa",
     "reinforcement", "db_assumed_mm",
+    "section_shape", "bf_mm", "hf_mm",
 })
 _AASHTO_FLEX_KEYS = _ACI_FLEX_KEYS | {
     "bar_spec", "exposure_class", "ms_nmm", "lam",
@@ -43,6 +44,7 @@ _ACI_BEAM_SHEAR_KEYS = frozenset({
     "stirrup_diameter_mm", "stirrup_area_mm2", "stirrup_legs",
     "db_long_assumed_mm", "lam", "d_mm",
     "torsion_enabled", "tu_nmm", "fy_long_mpa", "torsion_type",
+    "section_shape", "bf_mm", "hf_mm",
 })
 _AASHTO_BEAM_SHEAR_KEYS = _ACI_BEAM_SHEAR_KEYS | {
     "a_mm", "mu_nmm", "as_long_mm2",

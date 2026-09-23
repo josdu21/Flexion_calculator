@@ -2,10 +2,16 @@
 
 Todos los inputs internos están en SI: N, mm, MPa.
 
-La geometría del armado (lechos, centroide, separaciones) vive en
+La geometría —forma de la sección y disposición del armado— vive en
 :mod:`core.section_geometry` porque no depende de la norma; acá queda sólo lo
 propio de ACI 318-19. ``RebarLayer`` y ``ReinforcementConfig`` se re-exportan
 para no romper a quien las importe desde este módulo.
+
+Secciones con ala (T y L): se modela el **ala comprimida**, es decir momento
+positivo. ``b_mm`` es siempre el ancho del alma, que es el que rige cortante,
+torsión y el A_s mínimo de §9.6.1.2; el ala entra sólo por el bloque de
+compresión. Para una zona de momento negativo, donde el ala queda traccionada,
+la sección responde como rectangular de ancho ``b_w``: se elige esa forma.
 """
 import math
 from dataclasses import dataclass, field
@@ -15,10 +21,13 @@ from core.section_geometry import (  # noqa: F401  (re-exportadas a propósito)
     MIN_BAR_SPACING_MM,
     RebarLayer,
     ReinforcementConfig,
+    SectionProfile,
+    SectionShape,
     default_reinforcement,
     effective_depth,
     horizontal_clear_spacing,
     min_vertical_clear_spacing_mm,
+    steel_for_flanged_moment,
 )
 
 
@@ -75,9 +84,20 @@ class FlexionDesignResult:
     reinforcement: Optional["ReinforcementConfig"] = None
     layer_y_positions_mm: List[float] = field(default_factory=list)  # desde fibra inferior
 
+    # --- Forma de la sección ---
+    # En rectangular, b_f = b_mm y h_f = h_mm, de modo que el bloque de
+    # compresión nunca "sale" del ala y todo se reduce al caso de siempre.
+    section_shape: SectionShape = SectionShape.RECTANGULAR
+    bf_mm: float = 0.0                 # ancho efectivo del ala
+    hf_mm: float = 0.0                 # espesor del ala
+    yc_mm: float = 0.0                 # centroide del bloque comprimido, desde la fibra superior
+    flanged_behaviour: bool = False    # True si el eje neutro cae bajo el ala
+    asf_cm2: float = 0.0               # acero equivalente a los voladizos del ala
+    bf_max_mm: float = 0.0             # ancho de ala que admite el término en h_f de la Tabla 6.3.2.1
+
 
 class BeamSection:
-    """Sección rectangular de viga/losa diseñada a flexión."""
+    """Sección de viga/losa diseñada a flexión: rectangular, T o L."""
 
     def __init__(
         self,
@@ -90,6 +110,12 @@ class BeamSection:
         reinforcement: Optional[ReinforcementConfig] = None,
         # Compatibilidad: si no hay reinforcement, asume db simple
         db_assumed_mm: float = 16.0,
+        # Forma de la sección. Por omisión, rectangular: ``b_mm`` es el ancho
+        # y el ala no existe, que es como se comportaba antes de que hubiera
+        # formas con ala.
+        section_shape: SectionShape = SectionShape.RECTANGULAR,
+        bf_mm: float = 0.0,
+        hf_mm: float = 0.0,
     ):
         self.mu_nmm = mu_nmm
         self.b_mm = b_mm
@@ -98,6 +124,10 @@ class BeamSection:
         self.fc_mpa = fc_mpa
         self.fy_mpa = fy_mpa
         self.phi = 0.9  # ACI 318-19 §21.2.2 (tracción controlada)
+        self.section = SectionProfile.create(
+            shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
+            bf_mm=bf_mm, hf_mm=hf_mm,
+        )
 
         if reinforcement is None:
             # Configuración por defecto: 1 lecho, 2 barras del db_assumed
@@ -129,6 +159,8 @@ class BeamSection:
             return "Recubrimiento inválido"
         if self.fc_mpa <= 0 or self.fy_mpa <= 0:
             return "Resistencias deben ser positivas"
+        if self.section.is_flanged and self.section.hf_mm >= self.h_mm:
+            return "El espesor del ala debe ser menor que la altura total"
         return None
 
     def design(self) -> FlexionDesignResult:
@@ -153,6 +185,26 @@ class BeamSection:
             rho_required = 0.0
             as_required_cm2 = 0.0
             warnings_list.append(validation_error)
+        elif self.section.is_flanged:
+            # Con el ala comprimida el bloque deja de ser un rectángulo de
+            # ancho b, así que la cuantía cerrada de arriba no aplica: se
+            # resuelve por partes, voladizos del ala más alma.
+            as_req_mm2, factible = steel_for_flanged_moment(
+                self.section, self.mu_nmm / self.phi, d_mm,
+                0.85 * self.fc_mpa, self.fy_mpa,
+            )
+            if factible:
+                rho_required = (as_req_mm2 / (self.b_mm * d_mm)
+                                if self.b_mm > 0 and d_mm > 0 else 0.0)
+                as_required_cm2 = as_req_mm2 / 100.0
+                status = "OK"
+            else:
+                rho_required = 0.0
+                as_required_cm2 = 0.0
+                status = "AUMENTAR SECCIÓN"
+                warnings_list.append(
+                    "Sección insuficiente: Mu excede capacidad balanceada"
+                )
         elif discriminant < 0:
             rho_required = 0.0
             as_required_cm2 = 0.0
@@ -171,10 +223,18 @@ class BeamSection:
             term1 = term2 = 0.0
         as_min_cm2 = max(term1, term2)
 
-        # 5) As máximo
+        # 5) As máximo: el que lleva la sección a ε_t = 0.004
         rho_max = ((0.85 * beta_1 * self.fc_mpa / self.fy_mpa) * (0.003 / (0.003 + 0.004))
                    if self.fy_mpa > 0 else 0.0)
-        as_max_cm2 = rho_max * self.b_mm * d_mm / 100.0
+        if self.section.is_flanged and self.fy_mpa > 0:
+            # Mismo criterio de deformación, pero sobre el área realmente
+            # comprimida: con ala, ρ_max·b·d subestimaría el acero admisible.
+            a_max_mm = beta_1 * d_mm * (0.003 / (0.003 + 0.004))
+            as_max_cm2 = (0.85 * self.fc_mpa
+                          * self.section.compression_area_mm2(a_max_mm)
+                          / self.fy_mpa) / 100.0
+        else:
+            as_max_cm2 = rho_max * self.b_mm * d_mm / 100.0
 
         # 6) As proporcionado (lo que el usuario eligió)
         as_provided_cm2 = self.reinforcement.total_area_cm2
@@ -191,21 +251,44 @@ class BeamSection:
                 f"Acero proporcionado ({as_provided_cm2:.2f} cm²) < requerido "
                 f"({as_demand_cm2:.2f} cm²). Faltan {faltante:.2f} cm²"
             )
-        elif status == "OK" and rho_provided > rho_max:
+        elif status == "OK" and (
+            as_provided_cm2 > as_max_cm2 if self.section.is_flanged
+            else rho_provided > rho_max
+        ):
             status = "REDUCIR SECCIÓN"
-            warnings_list.append(
-                f"Cuantía proporcionada (ρ = {rho_provided:.4f}) excede "
-                f"ρ_max (ρ = {rho_max:.4f})"
-            )
+            if self.section.is_flanged:
+                # Con ala, ρ = A_s/(b_w·d) no se compara contra un ρ_max de
+                # sección rectangular: la comparación honesta es de áreas.
+                warnings_list.append(
+                    f"Acero proporcionado ({as_provided_cm2:.2f} cm²) excede "
+                    f"As_max ({as_max_cm2:.2f} cm²), el que lleva la sección "
+                    f"a ε_t = 0.004"
+                )
+            else:
+                warnings_list.append(
+                    f"Cuantía proporcionada (ρ = {rho_provided:.4f}) excede "
+                    f"ρ_max (ρ = {rho_max:.4f})"
+                )
 
         # 8) Bloque de Whitney basado en As proporcionado
-        a_mm = ((as_provided_mm2 * self.fy_mpa) / (0.85 * self.fc_mpa * self.b_mm)
-                if self.b_mm > 0 and self.fc_mpa > 0 else 0.0)
+        if self.section.is_flanged:
+            # Se parte del área comprimida que equilibra a la tracción y de ahí
+            # sale la profundidad del bloque, que puede quedar dentro del ala
+            # o meterse en el alma.
+            area_comp_mm2 = ((as_provided_mm2 * self.fy_mpa) / (0.85 * self.fc_mpa)
+                             if self.fc_mpa > 0 else 0.0)
+            a_mm = self.section.block_depth_mm(area_comp_mm2)
+            yc_mm = self.section.compression_centroid_mm(a_mm)
+            compression_kn = (0.85 * self.fc_mpa
+                              * self.section.compression_area_mm2(a_mm)) / 1000.0
+        else:
+            a_mm = ((as_provided_mm2 * self.fy_mpa) / (0.85 * self.fc_mpa * self.b_mm)
+                    if self.b_mm > 0 and self.fc_mpa > 0 else 0.0)
+            yc_mm = a_mm / 2.0
+            compression_kn = (0.85 * self.fc_mpa * self.b_mm * a_mm) / 1000.0
         c_mm = a_mm / beta_1 if beta_1 > 0 else 0.0
-        jd_mm = d_mm - a_mm / 2.0
+        jd_mm = d_mm - yc_mm
 
-        # Fuerzas
-        compression_kn = (0.85 * self.fc_mpa * self.b_mm * a_mm) / 1000.0
         tension_kn = (as_provided_mm2 * self.fy_mpa) / 1000.0
 
         # Capacidad φMn = φ · As · fy · (d - a/2) → N·mm → kN·m
@@ -230,6 +313,22 @@ class BeamSection:
                 f"Separación vertical entre lechos insuficiente: "
                 f"{s_v_used:.1f} mm < {s_v_min:.1f} mm (ACI 318-19 §25.2.2)"
             )
+
+        # 10) Ancho efectivo del ala (ACI 318-19 Tabla 6.3.2.1)
+        bf_max_mm = self.section.aci_max_flange_width_mm()
+        comportamiento_t = self.section.flange_is_fully_compressed(a_mm)
+        asf_cm2 = 0.0
+        if comportamiento_t:
+            asf_cm2 = (0.85 * self.fc_mpa
+                       * (self.section.bf_mm - self.section.bw_mm)
+                       * self.section.hf_mm / self.fy_mpa) / 100.0
+        if self.section.is_flanged and not validation_error:
+            if self.section.bf_mm > bf_max_mm:
+                warnings_list.append(
+                    f"Ancho efectivo del ala ({self.section.bf_mm:.0f} mm) mayor "
+                    f"que el límite por espesor de ala ({bf_max_mm:.0f} mm, "
+                    f"ACI 318-19 Tabla 6.3.2.1)"
+                )
 
         return FlexionDesignResult(
             b_mm=self.b_mm,
@@ -263,4 +362,11 @@ class BeamSection:
             warnings=warnings_list,
             reinforcement=self.reinforcement,
             layer_y_positions_mm=y_layers,
+            section_shape=self.section.shape,
+            bf_mm=self.section.bf_mm,
+            hf_mm=self.section.hf_mm,
+            yc_mm=yc_mm,
+            flanged_behaviour=comportamiento_t,
+            asf_cm2=asf_cm2,
+            bf_max_mm=bf_max_mm,
         )

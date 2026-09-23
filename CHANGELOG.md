@@ -6,6 +6,62 @@ y [versionado semántico](https://semver.org/lang/es/).
 Para publicar una versión: `python packaging/bump_version.py <x.y.z>`, completar
 la entrada de abajo, commitear y etiquetar con `git tag v<x.y.z>`.
 
+## [2.2.0]
+
+### Agregado
+
+- **Secciones de viga con ala: T y L.** Un selector en la geometría de
+  «Viga · Flexión» elige la forma, y con ella aparecen el ancho efectivo del
+  ala `b_f` y su espesor `h_f`. **Los resultados de la sección rectangular no
+  cambian**: está verificado contra la versión anterior, caso por caso y token
+  a token en la memoria.
+  - Flexión: el bloque de compresión se resuelve sobre el área realmente
+    comprimida. Si cabe dentro del ala, la sección responde como rectangular de
+    ancho `b_f`; si el eje neutro baja al alma, se separa el aporte de los
+    voladizos del ala (`A_sf`) del aporte del alma. El brazo de palanca pasa a
+    ser `d − ȳ`, con `ȳ` el centroide real de la compresión, que ya no es
+    `a/2`.
+  - `A_s,mín` se sigue midiendo sobre el alma (ACI 318-19 §9.6.1.2 con el ala
+    comprimida) y `A_s,máx` pasa a calcularse sobre el área comprimida a
+    `ε_t = 0.004`, porque `ρ_max·b·d` sólo vale en sección rectangular.
+  - En AASHTO, el `M_cr` de §5.6.3.3 usa el módulo de sección de la T
+    (`I_g/y_inf`) en vez de `b·h²/6`, y el `d_v` de §5.7.2.8 se mide contra el
+    brazo real `d_e − ȳ`.
+  - Torsión: `A_cp` y `p_cp` incluyen el voladizo del ala que admite
+    §22.7.4.1, limitado al menor entre el voladizo real, la proyección del alma
+    bajo el ala y `4·h_f`. `A_oh` y `p_h` siguen siendo los del estribo cerrado
+    del alma, que es el lado seguro. La memoria deja dicho que esto vale sólo
+    si el ala es monolítica con el alma.
+  - El cortante no cambia: `b_v` es y sigue siendo el ancho del alma.
+- El diagrama de esfuerzos dibuja la sección real —T o L, con el alma centrada
+  o al borde— y sombrea el bloque de compresión sobre el ancho que
+  efectivamente comprime.
+- La memoria desarrolla el cálculo por partes (ala + alma) con sus fórmulas, y
+  el cajetín dice la forma de la sección.
+- Se verifica el límite de `b_f` por espesor de ala (ACI 318-19 Tabla 6.3.2.1:
+  `8h_f` por lado en T, `6h_f` en L) y se advierte si se excede. Los otros dos
+  límites de esa tabla dependen de la luz y de la separación entre almas, que
+  la aplicación no pide: la memoria lo dice explícitamente.
+
+### Cambiado
+
+- El archivo del estudio pasa a **v3** y guarda la forma de la sección. Los
+  `.json` de la 2.1.0 se abren igual y se interpretan como viga rectangular.
+  La versión sube en vez de agregar la clave en silencio porque una versión
+  anterior leería un estudio de viga T como rectangular y daría un número
+  distinto sin avisar.
+- En la pestaña de cortante, «b» se identifica como el ancho del alma cuando la
+  viga tiene ala. La forma se define una sola vez, en flexión, y de ahí la
+  toman el `d_v` de AASHTO y el `A_cp` de torsión.
+
+### Alcance
+
+- Se modela el **ala comprimida**, es decir momento positivo. Para una zona de
+  momento negativo, donde el ala queda traccionada, corresponde elegir sección
+  rectangular con el ancho del alma.
+- La losa sigue siendo una franja rectangular de 1 m: no tiene selector de
+  forma.
+
 ## [2.1.0]
 
 ### Agregado

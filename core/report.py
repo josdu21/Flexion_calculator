@@ -22,6 +22,7 @@ from typing import Optional
 
 from core.design_code import DesignCode, code_of, spec
 from core.flexion import FlexionDesignResult
+from core.section_geometry import SectionProfile, SectionShape
 from core.project import ProjectInfo
 from core.version import APP_NAME, __version__
 from core.bar_tables import REBAR_SIZES
@@ -40,9 +41,41 @@ def _ref(code: DesignCode, seccion: str) -> str:
 # pensado también para la interfaz; en la memoria se muestran como fórmula.
 _DV_TEX = {
     "d_e − a/2": r"d_e - a/2",
+    "d_e − ȳ": r"d_e - \bar{y}",
     "0.9·d_e": r"0.9\,d_e",
     "0.72·h": r"0.72\,h",
 }
+
+
+def _con_ala(result) -> bool:
+    """¿El resultado viene de una sección con ala (T o L)?"""
+    forma = getattr(result, "section_shape", SectionShape.RECTANGULAR)
+    return forma is not SectionShape.RECTANGULAR
+
+
+def _perfil(result) -> SectionProfile:
+    """Perfil geométrico reconstruido desde el resultado."""
+    return SectionProfile.create(
+        shape=getattr(result, "section_shape", SectionShape.RECTANGULAR),
+        bw_mm=result.b_mm, h_mm=result.h_mm,
+        bf_mm=getattr(result, "bf_mm", 0.0),
+        hf_mm=getattr(result, "hf_mm", 0.0),
+    )
+
+
+def _tipo_viga(result) -> str:
+    """Rótulo de la sección para el cajetín de la memoria."""
+    perfil = _perfil(result)
+    return perfil.shape.value if perfil.is_flanged else "Viga rectangular"
+
+
+def _jd_tex(result) -> str:
+    """Brazo de palanca en notación matemática.
+
+    Con ala el centroide de la compresión no está en a/2, así que escribir
+    $d - a/2$ sería una fórmula falsa aunque el número fuera el correcto.
+    """
+    return r"d - \bar{y}" if _con_ala(result) else r"d - \dfrac{a}{2}"
 
 
 def _dv_tex(etiqueta: str) -> str:
@@ -77,6 +110,10 @@ def _aci_flexion_steps(result: FlexionDesignResult, cv) -> dict:
     term1 = (0.25 * math.sqrt(fc) / fy * b * d / 100) if fy > 0 else 0.0
     term2 = (1.4 / fy * b * d / 100) if fy > 0 else 0.0
     as_prov_mm2 = result.as_provided_cm2 * 100.0
+    jd_tex = _jd_tex(result)
+    # §9.6.1.2 mide sobre el ancho del alma cuando el ala está comprimida.
+    min_nota = ("<p>En una sección con ala comprimida, el $b$ de esta fórmula "
+                "es el ancho del alma $b_w$.</p>" if _con_ala(result) else "")
 
     return {
         "phi": 0.9,
@@ -144,6 +181,7 @@ controlada por tracción:</p>
   $$\\dfrac{{1.4}}{{{fy:.1f}}} \\cdot b \\cdot d = {term2*100:.1f}\\;\\text{{mm}}^2$$
   $$A_{{s,min}} = {A(result.as_min_cm2)}$$
 </div>
+{min_nota}
 """,
         "max_block": f"""
 <h3>2.5 Acero máximo
@@ -160,7 +198,7 @@ controlada por tracción:</p>
 <h3>2.8 Momento resistente nominal y reducido</h3>
 <div class="step">
   <div class="step-title">Capacidad de la sección</div>
-  $$M_n = A_s f_y \\left( d - \\dfrac{{a}}{{2}} \\right) =
+  $$M_n = A_s f_y \\left( {jd_tex} \\right) =
     {as_prov_mm2:.1f} \\cdot {fy:.1f} \\cdot {result.jd_mm:.2f} =
     {result.phi_mn_knm/0.9*1e6:.0f}\\;\\text{{N·mm}}$$
   $$\\phi M_n = 0.9 \\cdot M_n = {result.phi_mn_knm:.2f}\\;\\text{{kN·m}} = {M(result.phi_mn_knm)}$$
@@ -189,6 +227,10 @@ def _aashto_flexion_steps(result, cv) -> dict:
     a1 = result.alpha_1
     phi = result.phi_flexion
     as_prov_mm2 = result.as_provided_cm2 * 100.0
+    jd_tex = _jd_tex(result)
+    # Con ala el centroide sube hacia el ala y S_c deja de ser b·h²/6.
+    sc_tex = (r"\dfrac{I_g}{y_{inf}}" if _con_ala(result)
+              else r"\dfrac{b\,h^2}{6}")
     mn_knm = result.phi_mn_knm / phi if phi > 0 else 0.0
 
     comportamiento_chip = {
@@ -324,7 +366,7 @@ $M_{{cr}}$, para que el acero no fluya al fisurarse el concreto.</p>
 
 <div class="step">
   <div class="step-title">Momento de fisuración</div>
-  $$S_c = \\dfrac{{b\\,h^2}}{{6}} = {result.sc_mm3:.0f}\\;\\text{{mm}}^3$$
+  $$S_c = {sc_tex} = {result.sc_mm3:.0f}\\;\\text{{mm}}^3$$
   $$M_{{cr}} = \\gamma_3 \\, \\gamma_1 \\, f_r \\, S_c =
     {result.gamma_3:.2f} \\cdot {result.gamma_1:.1f} \\cdot {result.fr_mpa:.3f}
     \\cdot {result.sc_mm3:.0f} = {M(result.mcr_knm)}$$
@@ -380,7 +422,7 @@ llega al límite de compresión controlada $\\varepsilon_t = \\varepsilon_{{cl}}
 
 <div class="step">
   <div class="step-title">Capacidad de la sección</div>
-  $$M_n = A_s f_y \\left( d - \\dfrac{{a}}{{2}} \\right) =
+  $$M_n = A_s f_y \\left( {jd_tex} \\right) =
     {as_prov_mm2:.1f} \\cdot {fy:.1f} \\cdot {result.jd_mm:.2f} =
     {mn_knm*1e6:.0f}\\;\\text{{N·mm}}$$
   $$M_r = \\phi M_n = {phi:.3f} \\cdot M_n = {M(result.phi_mn_knm)}$$
@@ -409,10 +451,293 @@ llega al límite de compresión controlada $\\varepsilon_t = \\varepsilon_{{cl}}
     }
 
 
+def _flanged_required_block(result, cv, steps, code: DesignCode) -> str:
+    r"""Sección 2.3 para una sección con ala: el acero requerido, por partes.
+
+    Con ala el ancho comprimido no es constante, así que la cuantía cerrada
+    $\rho = \frac{1}{m}\left(1-\sqrt{1 - 2mR_n/f_y}\right)$ no aplica. Se sigue
+    el camino clásico: primero se prueba si el bloque de compresión cabe dentro
+    del ala —en cuyo caso la sección responde como una rectangular de ancho
+    $b_f$— y si no cabe, se separa el aporte de los voladizos del ala del
+    aporte del alma.
+    """
+    A = lambda cm2, d=2: cv.format_area(cm2, d)
+    perfil = _perfil(result)
+    alpha_tex, alpha_1 = steps["alpha_tex"], steps["alpha_1"]
+    phi = steps["phi"]
+    fc, fy, d = result.fc_mpa, result.fy_mpa, result.d_mm
+    bf, bw, hf = perfil.bf_mm, perfil.bw_mm, perfil.hf_mm
+    esfuerzo = alpha_1 * fc
+    mn_req = result.mu_demand_knm * 1e6 / phi if phi > 0 else 0.0
+
+    ref = _ref(code, "§5.6.3.2" if code is DesignCode.AASHTO_LRFD_2020
+               else "§22.2 / §6.3.2.1")
+
+    # Profundidad que tendría el bloque si toda la compresión cupiera en el ala.
+    disc = d * d - 2.0 * mn_req / (esfuerzo * bf) if esfuerzo * bf > 0 else -1.0
+    a_ala = d - math.sqrt(disc) if disc >= 0 else 0.0
+    cabe_en_el_ala = disc >= 0 and a_ala <= hf
+
+    encabezado = f"""
+<h3>2.3 Acero requerido — sección con ala
+  {ref}
+</h3>
+<p>El ancho comprimido de una sección {escape(perfil.shape.value)} no es
+constante: vale $b_f$ mientras el bloque de compresión no pase del ala, y $b_w$
+por debajo de ella. Se resuelve entonces en dos pasos.</p>
+
+<div class="step">
+  <div class="step-title">Paso 1 — ¿el bloque cabe dentro del ala?</div>
+  $$a = d - \\sqrt{{d^2 - \\dfrac{{2\\,M_n}}{{{alpha_tex}\\,f'_c\\,b_f}}}} =
+    {a_ala:.2f}\\;\\text{{mm}}
+    \\qquad h_f = {hf:.2f}\\;\\text{{mm}}$$
+</div>
+"""
+
+    if cabe_en_el_ala:
+        return encabezado + f"""
+<p>Como $a \\le h_f$, todo el bloque de compresión queda dentro del ala: la
+sección resiste <b>como una rectangular de ancho $b_f$</b> y el alma no
+interviene en la flexión.</p>
+
+<div class="step">
+  <div class="step-title">Área de acero requerida</div>
+  $$A_{{s,req}} = \\dfrac{{{alpha_tex}\\,f'_c\\,b_f\\,a}}{{f_y}} =
+    \\dfrac{{{alpha_tex} \\cdot {fc:.1f} \\cdot {bf:.1f} \\cdot {a_ala:.2f}}}{{{fy:.1f}}} =
+    {result.as_required_cm2 * 100:.1f}\\;\\text{{mm}}^2 = {A(result.as_required_cm2)}$$
+</div>
+"""
+
+    # Comportamiento de T: voladizos del ala más alma.
+    asf = esfuerzo * (bf - bw) * hf / fy if fy > 0 else 0.0
+    mn_ala = asf * fy * (d - hf / 2.0)
+    mn_alma = max(mn_req - mn_ala, 0.0)
+    disc_alma = (d * d - 2.0 * mn_alma / (esfuerzo * bw)
+                 if esfuerzo * bw > 0 else -1.0)
+    a_alma = d - math.sqrt(disc_alma) if disc_alma >= 0 else 0.0
+    asw = esfuerzo * bw * a_alma / fy if fy > 0 else 0.0
+
+    return encabezado + f"""
+<p>Como $a > h_f$, el eje neutro baja al alma y la sección trabaja
+<b>como T</b>. La compresión se separa en dos partes: los voladizos del ala, de
+ancho $b_f - b_w$ y altura $h_f$, y el alma de ancho $b_w$.</p>
+
+<div class="step">
+  <div class="step-title">Paso 2a — acero equivalente a los voladizos del ala</div>
+  $$A_{{sf}} = \\dfrac{{{alpha_tex}\\,f'_c\\,(b_f - b_w)\\,h_f}}{{f_y}} =
+    \\dfrac{{{alpha_tex} \\cdot {fc:.1f} \\cdot ({bf:.1f} - {bw:.1f}) \\cdot {hf:.2f}}}{{{fy:.1f}}} =
+    {asf:.1f}\\;\\text{{mm}}^2$$
+  $$M_{{n,f}} = A_{{sf}}\\,f_y \\left( d - \\dfrac{{h_f}}{{2}} \\right) =
+    {mn_ala / 1e6:.2f}\\;\\text{{kN·m}}$$
+</div>
+
+<div class="step">
+  <div class="step-title">Paso 2b — el alma toma el momento restante</div>
+  $$M_{{n,w}} = M_n - M_{{n,f}} = {mn_req / 1e6:.2f} - {mn_ala / 1e6:.2f} =
+    {mn_alma / 1e6:.2f}\\;\\text{{kN·m}}$$
+  $$a_w = d - \\sqrt{{d^2 - \\dfrac{{2\\,M_{{n,w}}}}{{{alpha_tex}\\,f'_c\\,b_w}}}} =
+    {a_alma:.2f}\\;\\text{{mm}}$$
+  $$A_{{sw}} = \\dfrac{{{alpha_tex}\\,f'_c\\,b_w\\,a_w}}{{f_y}} =
+    {asw:.1f}\\;\\text{{mm}}^2$$
+</div>
+
+<div class="step">
+  <div class="step-title">Área de acero requerida</div>
+  $$A_{{s,req}} = A_{{sf}} + A_{{sw}} = {asf:.1f} + {asw:.1f} =
+    {result.as_required_cm2 * 100:.1f}\\;\\text{{mm}}^2 = {A(result.as_required_cm2)}$$
+</div>
+"""
+
+
+def _flanged_max_block(result, cv, steps, code: DesignCode) -> str:
+    """Sección 2.5 con ala: el máximo sale del área comprimida, no de ρ·b·d."""
+    A = lambda cm2, d=2: cv.format_area(cm2, d)
+    perfil = _perfil(result)
+    alpha_tex = steps["alpha_tex"]
+    a_max = result.beta_1 * result.d_mm * (0.003 / 0.007)
+    return f"""
+<h3>2.5 Acero máximo
+  {_ref(code, "§21.2 — Condición de tracción controlada")}
+</h3>
+<p>Para que la falla sea dúctil ($\\varepsilon_t \\ge 0.004$). Con ala, el
+$\\rho_{{max}}$ de sección rectangular no aplica: el límite se escribe sobre el
+área realmente comprimida a esa deformación.</p>
+<div class="step">
+  <div class="step-title">Cálculo de $A_{{s,max}}$</div>
+  $$c_{{max}} = \\dfrac{{0.003}}{{0.003 + 0.004}}\\,d, \\qquad
+    a_{{max}} = \\beta_1\\,c_{{max}} = {a_max:.2f}\\;\\text{{mm}}$$
+  $$A_{{s,max}} = \\dfrac{{{alpha_tex}\\,f'_c\\,A_c(a_{{max}})}}{{f_y}} =
+    \\dfrac{{{alpha_tex} \\cdot {result.fc_mpa:.1f} \\cdot
+    {perfil.compression_area_mm2(a_max):.0f}}}{{{result.fy_mpa:.1f}}} =
+    {A(result.as_max_cm2)}$$
+</div>
+"""
+
+
+def _stress_block_section(result, cv, steps) -> str:
+    """Secciones 2.6 y 2.7: bloque de compresión y fuerzas internas.
+
+    Las dos formas llegan a las mismas magnitudes —$a$, $c$, $jd$, $C$ y $T$—
+    pero no por el mismo camino: con ala, ``a`` sale del *área* comprimida que
+    equilibra a la tracción, porque dividir por un ancho constante no
+    corresponde.
+    """
+    L = lambda mm, d=1: cv.format_length_small(mm, d)
+    A = lambda cm2, d=2: cv.format_area(cm2, d)
+    perfil = _perfil(result)
+    alpha_tex, alpha_1 = steps["alpha_tex"], steps["alpha_1"]
+    fc, fy = result.fc_mpa, result.fy_mpa
+    b, d, a, c = result.b_mm, result.d_mm, result.a_mm, result.c_mm
+    as_prov_mm2 = result.as_provided_cm2 * 100.0
+    c_force, t_force = result.compression_kn, result.tension_kn
+    equilibrado = abs(c_force - t_force) < 0.5
+    eq_clase = "ok" if equilibrado else "fail"
+    eq_texto = "CUMPLE" if equilibrado else "NO CUMPLE"
+
+    if not perfil.is_flanged:
+        return f"""
+<h3>2.6 {steps["whitney_title"]}
+  {steps["whitney_ref"]}
+</h3>
+<p>Con el acero proporcionado $A_{{s}} = {A(result.as_provided_cm2)}$:</p>
+<div class="step">
+  <div class="step-title">Profundidad del bloque equivalente $a$</div>
+  $$a = \\dfrac{{A_s f_y}}{{{alpha_tex} f'_c b}} =
+    \\dfrac{{{as_prov_mm2:.1f} \\cdot {fy:.1f}}}{{{alpha_tex} \\cdot {fc:.1f} \\cdot {b:.1f}}} =
+    {a:.2f}\\;\\text{{mm}} = {L(a, 2)}$$
+</div>
+<div class="step">
+  <div class="step-title">Profundidad al eje neutro $c$</div>
+  $$c = \\dfrac{{a}}{{\\beta_1}} = \\dfrac{{{a:.2f}}}{{{result.beta_1:.3f}}} =
+    {c:.2f}\\;\\text{{mm}} = {L(c, 2)}$$
+</div>
+<div class="step">
+  <div class="step-title">Brazo de palanca $jd$</div>
+  $$jd = d - \\dfrac{{a}}{{2}} = {d:.2f} - \\dfrac{{{a:.2f}}}{{2}} =
+    {result.jd_mm:.2f}\\;\\text{{mm}} = {L(result.jd_mm, 2)}$$
+</div>
+
+<h3>2.7 Fuerzas internas</h3>
+<div class="step">
+  <div class="step-title">Resultante de compresión $C$</div>
+  $$C = {alpha_tex} \\cdot f'_c \\cdot b \\cdot a =
+    {alpha_tex} \\cdot {fc:.1f} \\cdot {b:.1f} \\cdot {a:.2f} =
+    {c_force * 1000:.0f}\\;\\text{{N}} = {c_force:.2f}\\;\\text{{kN}}$$
+</div>
+<div class="step">
+  <div class="step-title">Resultante de tensión $T$</div>
+  $$T = A_s \\cdot f_y = {as_prov_mm2:.1f} \\cdot {fy:.1f} =
+    {t_force * 1000:.0f}\\;\\text{{N}} = {t_force:.2f}\\;\\text{{kN}}$$
+</div>
+<p>Verificación de equilibrio: $C \\approx T$ &nbsp;<span class="chip {eq_clase}">{eq_texto}</span></p>
+"""
+
+    area_comp = as_prov_mm2 * fy / (alpha_1 * fc) if fc > 0 else 0.0
+    area_ala = perfil.bf_mm * perfil.hf_mm
+    if a <= perfil.hf_mm:
+        despeje = f"""
+  $$A_c \\le b_f h_f = {area_ala:.0f}\\;\\text{{mm}}^2
+    \\;\\Rightarrow\\; a = \\dfrac{{A_c}}{{b_f}} =
+    {a:.2f}\\;\\text{{mm}} = {L(a, 2)}$$"""
+        nota_forma = ("El bloque no sale del ala, así que la sección resiste "
+                      "como una rectangular de ancho $b_f$.")
+    else:
+        despeje = f"""
+  $$A_c > b_f h_f = {area_ala:.0f}\\;\\text{{mm}}^2
+    \\;\\Rightarrow\\; a = h_f + \\dfrac{{A_c - b_f h_f}}{{b_w}} =
+    {a:.2f}\\;\\text{{mm}} = {L(a, 2)}$$"""
+        nota_forma = "El bloque entra en el alma: la sección trabaja como T."
+
+    return f"""
+<h3>2.6 {steps["whitney_title"]}
+  {steps["whitney_ref"]}
+</h3>
+<p>Con el acero proporcionado $A_{{s}} = {A(result.as_provided_cm2)}$.
+{nota_forma}</p>
+<div class="step">
+  <div class="step-title">Área comprimida que equilibra a la tracción</div>
+  $$A_c = \\dfrac{{A_s f_y}}{{{alpha_tex} f'_c}} =
+    \\dfrac{{{as_prov_mm2:.1f} \\cdot {fy:.1f}}}{{{alpha_tex} \\cdot {fc:.1f}}} =
+    {area_comp:.0f}\\;\\text{{mm}}^2$$
+</div>
+<div class="step">
+  <div class="step-title">Profundidad del bloque equivalente $a$</div>{despeje}
+</div>
+<div class="step">
+  <div class="step-title">Profundidad al eje neutro $c$</div>
+  $$c = \\dfrac{{a}}{{\\beta_1}} = \\dfrac{{{a:.2f}}}{{{result.beta_1:.3f}}} =
+    {c:.2f}\\;\\text{{mm}} = {L(c, 2)}$$
+</div>
+<div class="step">
+  <div class="step-title">Centroide de la compresión y brazo de palanca</div>
+  $$\\bar{{y}} = \\dfrac{{\\sum A_i\\,y_i}}{{A_c}} = {result.yc_mm:.2f}\\;\\text{{mm}}
+    \\qquad jd = d - \\bar{{y}} = {d:.2f} - {result.yc_mm:.2f} =
+    {result.jd_mm:.2f}\\;\\text{{mm}} = {L(result.jd_mm, 2)}$$
+  <p>En una sección rectangular $\\bar{{y}} = a/2$; con ala el centroide sube
+  hacia el ala, que es más ancha, y el brazo de palanca resulta mayor.</p>
+</div>
+
+<h3>2.7 Fuerzas internas</h3>
+<div class="step">
+  <div class="step-title">Resultante de compresión $C$</div>
+  $$C = {alpha_tex} \\cdot f'_c \\cdot A_c =
+    {alpha_tex} \\cdot {fc:.1f} \\cdot {area_comp:.0f} =
+    {c_force * 1000:.0f}\\;\\text{{N}} = {c_force:.2f}\\;\\text{{kN}}$$
+</div>
+<div class="step">
+  <div class="step-title">Resultante de tensión $T$</div>
+  $$T = A_s \\cdot f_y = {as_prov_mm2:.1f} \\cdot {fy:.1f} =
+    {t_force * 1000:.0f}\\;\\text{{N}} = {t_force:.2f}\\;\\text{{kN}}$$
+</div>
+<p>Verificación de equilibrio: $C \\approx T$ &nbsp;<span class="chip {eq_clase}">{eq_texto}</span></p>
+"""
+
+
+# Salvedad de norma sobre el ancho efectivo del ala. Va en la memoria y no en
+# las advertencias del resultado: es una condición del método, no un hallazgo
+# sobre este diseño en particular.
+_NOTA_ALA_ACI = """
+<div class="alert-info">
+  <b>Ancho efectivo del ala.</b> Se tomó el valor ingresado. La Tabla 6.3.2.1
+  limita el voladizo del ala al menor entre $8h_f$ (sección T) o $6h_f$
+  (sección L), la mitad de la separación libre al alma vecina y $l_n/8$ (T) o
+  $l_n/12$ (L). Sólo el primero se verifica acá: los otros dos dependen de la
+  luz y de la separación entre vigas, que esta memoria no conoce.
+</div>
+"""
+
+_NOTA_ALA_AASHTO = """
+<div class="alert-info">
+  <b>Ancho efectivo del ala.</b> Se tomó el valor ingresado. §4.6.2.6.1 lo
+  iguala al <b>ancho tributario</b> —media separación a cada viga vecina, más
+  el voladizo en las exteriores— y no a un múltiplo del espesor del ala como
+  hace ACI 318-19. El límite en $h_f$ que aparece en la tabla de geometría es
+  el de ACI, incluido sólo como referencia.
+</div>
+"""
+
+
 def _flexion_steps(result, cv, code: DesignCode) -> dict:
     if code is DesignCode.AASHTO_LRFD_2020:
-        return _aashto_flexion_steps(result, cv)
-    return _aci_flexion_steps(result, cv)
+        steps = _aashto_flexion_steps(result, cv)
+    else:
+        steps = _aci_flexion_steps(result, cv)
+
+    # Las secciones 2.6 y 2.7 son comunes a las dos normas salvo por el
+    # esfuerzo del bloque, que ya viene resuelto en ``alpha_tex``.
+    steps["block_section"] = _stress_block_section(result, cv, steps)
+
+    if _con_ala(result):
+        steps["required_block"] = _flanged_required_block(result, cv, steps, code)
+        if code is DesignCode.ACI_318_19:
+            # El de AASHTO no depende del ancho: habla de ε_t, no de ρ·b·d.
+            steps["max_block"] = _flanged_max_block(result, cv, steps, code)
+        steps["flange_note"] = (_NOTA_ALA_AASHTO
+                                if code is DesignCode.AASHTO_LRFD_2020
+                                else _NOTA_ALA_ACI)
+    else:
+        steps["flange_note"] = ""
+    return steps
 
 
 def _flexion_fragments(
@@ -540,6 +865,31 @@ def _flexion_fragments(
     sep_v_class = "ok" if result.vertical_spacing_ok else "fail"
     sep_v_applies = result.vertical_spacing_mm > 0
 
+    # Con ala, «b» deja de ser el ancho de la sección y pasa a ser el del alma:
+    # el rótulo cambia para que la tabla no diga algo distinto de lo que mide.
+    perfil = _perfil(result)
+    if perfil.is_flanged:
+        bf_ok = perfil.bf_mm <= result.bf_max_mm
+        forma_row = (
+            f'  <tr><td>Forma de la sección</td><td>—</td>'
+            f'<td class="num">{escape(perfil.shape.value)}</td></tr>\n'
+        )
+        ancho_caption, ancho_simbolo = "Ancho del alma", "b_w"
+        ala_rows = (
+            f'  <tr><td>Ancho efectivo del ala</td><td>$b_f$</td>'
+            f'<td class="num">{L(perfil.bf_mm)}</td></tr>\n'
+            f'  <tr><td>Espesor del ala</td><td>$h_f$</td>'
+            f'<td class="num">{L(perfil.hf_mm)}</td></tr>\n'
+            f'  <tr><td>Límite de $b_f$ por espesor de ala</td><td>—</td>'
+            f'<td class="num">{L(result.bf_max_mm)} '
+            f'<span class="chip {"ok" if bf_ok else "fail"}">'
+            f'{"CUMPLE" if bf_ok else "EXCEDE"}</span></td></tr>\n'
+        )
+    else:
+        forma_row = ""
+        ancho_caption, ancho_simbolo = "Ancho de la sección", "b"
+        ala_rows = ""
+
     return {
         "inputs": f"""
 <!-- ============ 1. DATOS DE ENTRADA ============ -->
@@ -557,11 +907,12 @@ def _flexion_fragments(
 
 <h3>1.2 Geometría</h3>
 <table class="data">
-  <tr>
-    <td>Ancho de la sección</td>
-    <td>$b$</td>
+{forma_row}  <tr>
+    <td>{ancho_caption}</td>
+    <td>${ancho_simbolo}$</td>
     <td class="num">{L(b)}</td>
   </tr>
+{ala_rows}
   <tr>
     <td>Altura total</td>
     <td>$h$</td>
@@ -603,6 +954,7 @@ def _flexion_fragments(
 </table>
 
 {extra_input_blocks}
+{steps["flange_note"]}
 """,
         "calc": f"""
 <!-- ============ 2. CÁLCULOS ============ -->
@@ -617,40 +969,7 @@ def _flexion_fragments(
 {steps["required_block"]}
 {steps["min_block"]}
 {steps["max_block"]}
-<h3>2.6 {steps["whitney_title"]}
-  {steps["whitney_ref"]}
-</h3>
-<p>Con el acero proporcionado $A_{{s}} = {A(as_prov)}$:</p>
-<div class="step">
-  <div class="step-title">Profundidad del bloque equivalente $a$</div>
-  $$a = \\dfrac{{A_s f_y}}{{{alpha_tex} f'_c b}} =
-    \\dfrac{{{as_prov_mm2:.1f} \\cdot {fy:.1f}}}{{{alpha_tex} \\cdot {fc:.1f} \\cdot {b:.1f}}} =
-    {a:.2f}\\;\\text{{mm}} = {L(a, 2)}$$
-</div>
-<div class="step">
-  <div class="step-title">Profundidad al eje neutro $c$</div>
-  $$c = \\dfrac{{a}}{{\\beta_1}} = \\dfrac{{{a:.2f}}}{{{beta_1:.3f}}} =
-    {c:.2f}\\;\\text{{mm}} = {L(c, 2)}$$
-</div>
-<div class="step">
-  <div class="step-title">Brazo de palanca $jd$</div>
-  $$jd = d - \\dfrac{{a}}{{2}} = {d:.2f} - \\dfrac{{{a:.2f}}}{{2}} =
-    {result.jd_mm:.2f}\\;\\text{{mm}} = {L(result.jd_mm, 2)}$$
-</div>
-
-<h3>2.7 Fuerzas internas</h3>
-<div class="step">
-  <div class="step-title">Resultante de compresión $C$</div>
-  $$C = {alpha_tex} \\cdot f'_c \\cdot b \\cdot a =
-    {alpha_tex} \\cdot {fc:.1f} \\cdot {b:.1f} \\cdot {a:.2f} =
-    {c_force*1000:.0f}\\;\\text{{N}} = {c_force:.2f}\\;\\text{{kN}}$$
-</div>
-<div class="step">
-  <div class="step-title">Resultante de tensión $T$</div>
-  $$T = A_s \\cdot f_y = {as_prov_mm2:.1f} \\cdot {fy:.1f} =
-    {t_force*1000:.0f}\\;\\text{{N}} = {t_force:.2f}\\;\\text{{kN}}$$
-</div>
-<p>Verificación de equilibrio: $C \\approx T$ &nbsp;<span class="chip {'ok' if abs(c_force - t_force) < 0.5 else 'fail'}">{'CUMPLE' if abs(c_force - t_force) < 0.5 else 'NO CUMPLE'}</span></p>
+{steps["block_section"]}
 {steps["capacity_block"]}
 <!-- ============ 3. VERIFICACIONES ============ -->
 <h2>3. Verificaciones (flexión)</h2>
@@ -1607,12 +1926,20 @@ def _beam_shear_fragments(
             f'<tr><td>Fluencia del acero longitudinal</td><td>$f_y$</td>'
             f'<td class="num">{S(t.fy_long_mpa)}</td></tr>'
         )
+        # Con ala, el contorno exterior suma los voladizos que admite
+        # §22.7.4.1, y las expresiones de siempre dejan de describirlo.
+        if getattr(t, "flange_overhang_mm", 0.0) > 0:
+            acp_tex = r"A_{cp} = b_w h + n\,b_e h_f"
+            pcp_tex = r"p_{cp} = 2(b_w + h) + 2\,n\,b_e"
+        else:
+            acp_tex = r"A_{cp} = b\,h"
+            pcp_tex = r"p_{cp} = 2(b+h)"
         section_props_block = f"""
 <h3>{si}.6 Propiedades de la sección para torsión</h3>
 <table class="data">
-  <tr><td>Área encerrada por el perímetro exterior</td><td>$A_{{cp}} = b\\,h$</td>
+  <tr><td>Área encerrada por el perímetro exterior</td><td>${acp_tex}$</td>
       <td class="num">{t.acp_mm2:,.0f} mm²</td></tr>
-  <tr><td>Perímetro exterior</td><td>$p_{{cp}} = 2(b+h)$</td>
+  <tr><td>Perímetro exterior</td><td>${pcp_tex}$</td>
       <td class="num">{t.pcp_mm:,.0f} mm</td></tr>
   <tr><td>Área encerrada por el eje del estribo</td><td>$A_{{oh}}$</td>
       <td class="num">{t.aoh_mm2:,.0f} mm²</td></tr>
@@ -1991,7 +2318,7 @@ def generate_beam_report(
     )
 
     body = (
-        _doc_head(subtitle, info, element_name, "Viga rectangular", fecha, code)
+        _doc_head(subtitle, info, element_name, _tipo_viga(flexion), fecha, code)
         + fx["inputs"]
         + fx["calc"]
         + sh["calc"]

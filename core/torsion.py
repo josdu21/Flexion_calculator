@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, fields
 from typing import List, Optional
 
 from core.bar_tables import REBAR_SIZES
+from core.section_geometry import SectionProfile, SectionShape
 from core.shear import (
     PHI_SHEAR,
     S_PRACTICAL_ROUND_MM,
@@ -140,6 +141,8 @@ class BeamShearTorsionResult(BeamShearResult):
     # --- Propiedades de la sección para torsión ---
     acp_mm2: float = 0.0                # área encerrada por el perímetro exterior
     pcp_mm: float = 0.0                 # perímetro exterior
+    section_shape: SectionShape = SectionShape.RECTANGULAR
+    flange_overhang_mm: float = 0.0     # voladizo del ala computado (§22.7.4.1)
     aoh_mm2: float = 0.0                # área encerrada por el eje del estribo
     ph_mm: float = 0.0                  # perímetro del eje del estribo
     ao_mm2: float = 0.0                 # 0.85·A_oh
@@ -184,7 +187,7 @@ class BeamShearTorsionResult(BeamShearResult):
 
 
 class BeamShearTorsionDesign:
-    """Diseño de viga rectangular por cortante y torsión combinados.
+    """Diseño de viga por cortante y torsión combinados.
 
     Con ``torsion_enabled=False`` (o Tu = 0) se comporta exactamente igual que
     :class:`~core.shear.BeamShearDesign`, devolviendo el mismo diseño por
@@ -210,6 +213,12 @@ class BeamShearTorsionDesign:
         tu_nmm: float = 0.0,
         fy_long_mpa: float = 420.0,
         torsion_type: str = "EQUILIBRIO",
+        # --- forma de la sección ---
+        # El cortante usa siempre ``b_mm`` (el alma); el ala sólo entra en la
+        # torsión, por A_cp y p_cp (§22.7.4.1).
+        section_shape: SectionShape = SectionShape.RECTANGULAR,
+        bf_mm: float = 0.0,
+        hf_mm: float = 0.0,
     ):
         self.vu_n = vu_n
         self.b_mm = b_mm
@@ -227,6 +236,10 @@ class BeamShearTorsionDesign:
         self.tu_nmm = max(tu_nmm, 0.0)
         self.fy_long_mpa = fy_long_mpa
         self.torsion_type = torsion_type
+        self.section = SectionProfile.create(
+            shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
+            bf_mm=bf_mm, hf_mm=hf_mm,
+        )
 
     # ------------------------------------------------------------
 
@@ -247,9 +260,15 @@ class BeamShearTorsionDesign:
         ).design()
 
     def _section_properties(self):
-        """(A_cp, p_cp, A_oh, p_h) para sección rectangular sólida."""
-        acp = self.b_mm * self.h_mm
-        pcp = 2.0 * (self.b_mm + self.h_mm)
+        """(A_cp, p_cp, A_oh, p_h) de la sección sólida.
+
+        Con ala, ACI 318-19 §22.7.4.1 permite sumar los voladizos al contorno
+        exterior, limitados a la proyección del alma bajo el ala y a 4·h_f.
+        A_oh y p_h, en cambio, siguen siendo los del estribo cerrado del alma:
+        tomar un A_oh menor exige más estribo, así que el lado de la resistencia
+        queda del lado seguro.
+        """
+        acp, pcp = self.section.torsion_gross_properties()
         # Ejes del estribo cerrado más exterior
         x1 = self.b_mm - 2.0 * self.cover_mm - self.stirrup_diameter_mm
         y1 = self.h_mm - 2.0 * self.cover_mm - self.stirrup_diameter_mm
@@ -275,6 +294,16 @@ class BeamShearTorsionDesign:
 
         acp, pcp, aoh, ph = self._section_properties()
         ao = 0.85 * aoh
+        be = self.section.torsion_overhang_mm()
+        if be > 0:
+            lados = ("a cada lado" if self.section.flange_sides == 2
+                     else "del lado del ala")
+            warns.append(
+                f"A_cp y p_cp incluyen {be:.0f} mm de voladizo de ala {lados} "
+                f"(§22.7.4.1: el menor entre el voladizo real, la proyección "
+                f"del alma bajo el ala y 4·h_f). Vale si el ala es monolítica "
+                f"con el alma; si no lo es, usar sección rectangular."
+            )
 
         if aoh <= 0 or ph <= 0:
             base["status"] = "ERROR"
@@ -307,6 +336,7 @@ class BeamShearTorsionDesign:
             tu_knm=self.tu_nmm / 1e6,
             torsion_type=self.torsion_type,
             acp_mm2=acp, pcp_mm=pcp, aoh_mm2=aoh, ph_mm=ph, ao_mm2=ao,
+            section_shape=self.section.shape, flange_overhang_mm=be,
             theta_deg=THETA_DEG, fy_long_mpa=fy_l,
             t_th_knm=t_th / 1e6, phi_t_th_knm=phi_t_th / 1e6,
             t_cr_knm=t_cr / 1e6, phi_t_cr_knm=phi_t_cr / 1e6,

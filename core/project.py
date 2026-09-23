@@ -16,7 +16,12 @@ from core.units import UnitSystem
 FILE_FORMAT = "calculadora-acero"
 # v1 → v2: se agregó la norma de diseño. Un archivo v1 se lee como ACI 318-19,
 # que era la única norma que existía cuando se escribió.
-FILE_VERSION = 2
+# v2 → v3: se agregó la forma de la sección de viga (rectangular, T o L). Un
+# archivo v2 se lee como rectangular, que era la única forma disponible. La
+# versión sube —y no se agrega la clave en silencio— porque una versión previa
+# leería un estudio de viga T como rectangular y daría un número distinto sin
+# avisar; refusarlo es preferible a eso.
+FILE_VERSION = 3
 FILE_FILTER = "Estudio de acero (*.json);;Todos los archivos (*)"
 
 

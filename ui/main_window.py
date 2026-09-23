@@ -344,10 +344,18 @@ class MainWindow(QMainWindow):
         AASHTO necesita además el bloque de compresión (para d_v) y el momento
         con el acero longitudinal (para la revisión de §5.7.3.5); todo eso sale
         del mismo diseño a flexión, así que no se le pide nada extra al usuario.
+
+        La forma de la sección viaja por el mismo camino: se define una sola vez
+        en flexión y de ahí la toman el d_v de AASHTO y el A_cp de torsión, que
+        son los únicos lugares donde el ala interviene. El cortante en sí sigue
+        usando el ancho del alma.
         """
         flexion = self._beam_flex_design()
         values = self.beam_shear_inputs.get_values()
         values["d_mm"] = flexion.d_mm
+        values["section_shape"] = flexion.section_shape
+        values["bf_mm"] = flexion.bf_mm
+        values["hf_mm"] = flexion.hf_mm
         values["a_mm"] = flexion.a_mm
         values["mu_nmm"] = flexion.mu_demand_knm * 1e6
         values["as_long_mm2"] = flexion.as_provided_cm2 * 100.0
@@ -396,6 +404,9 @@ class MainWindow(QMainWindow):
     def calculate_beam_shear(self):
         if self._initializing:
             return
+        self.beam_shear_inputs.set_section_shape(
+            self.beam_flex_inputs.section_shape()
+        )
         try:
             result = self._beam_shear_design()
             self.beam_shear_results.display_results(result)

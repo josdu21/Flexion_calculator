@@ -30,6 +30,7 @@ import math
 from dataclasses import dataclass, field, fields
 from typing import List, Optional
 
+from core.section_geometry import SectionProfile, SectionShape
 from core.torsion import (
     BeamShearTorsionResult,
     LongBarSuggestion,
@@ -144,6 +145,10 @@ class AashtoBeamShearTorsionDesign:
         tu_nmm: float = 0.0,
         fy_long_mpa: float = 420.0,
         torsion_type: str = "EQUILIBRIO",
+        # --- forma de la sección ---
+        section_shape: SectionShape = SectionShape.RECTANGULAR,
+        bf_mm: float = 0.0,
+        hf_mm: float = 0.0,
     ):
         self.vu_n = vu_n
         self.b_mm = b_mm
@@ -164,6 +169,13 @@ class AashtoBeamShearTorsionDesign:
         self.tu_nmm = max(tu_nmm, 0.0)
         self.fy_long_mpa = fy_long_mpa
         self.torsion_type = torsion_type
+        self.section_shape = section_shape
+        self.bf_mm = bf_mm
+        self.hf_mm = hf_mm
+        self.section = SectionProfile.create(
+            shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
+            bf_mm=bf_mm, hf_mm=hf_mm,
+        )
 
     # ------------------------------------------------------------
 
@@ -185,12 +197,19 @@ class AashtoBeamShearTorsionDesign:
             mu_nmm=self.mu_nmm,
             as_long_mm2=self.as_long_mm2,
             fy_long_mpa=self.fy_long_mpa,
+            section_shape=self.section_shape,
+            bf_mm=self.bf_mm,
+            hf_mm=self.hf_mm,
         ).design()
 
     def _section_properties(self):
-        """(A_cp, p_c, A_oh, p_h) para sección rectangular sólida."""
-        acp = self.b_mm * self.h_mm
-        pc = 2.0 * (self.b_mm + self.h_mm)
+        """(A_cp, p_c, A_oh, p_h) de la sección sólida.
+
+        Con ala se aplica el mismo criterio que ACI 318-19 §22.7.4.1: el
+        voladizo computable se limita a la proyección del alma bajo el ala y a
+        4·h_f. A_oh y p_h siguen siendo los del estribo cerrado del alma.
+        """
+        acp, pc = self.section.torsion_gross_properties()
         x1 = self.b_mm - 2.0 * self.cover_mm - self.stirrup_diameter_mm
         y1 = self.h_mm - 2.0 * self.cover_mm - self.stirrup_diameter_mm
         aoh = max(x1, 0.0) * max(y1, 0.0)
@@ -219,6 +238,16 @@ class AashtoBeamShearTorsionDesign:
 
         acp, pc, aoh, ph = self._section_properties()
         ao = 0.85 * aoh
+        be = self.section.torsion_overhang_mm()
+        if be > 0:
+            lados = ("a cada lado" if self.section.flange_sides == 2
+                     else "del lado del ala")
+            warns.append(
+                f"A_cp y p_c incluyen {be:.0f} mm de voladizo de ala {lados} "
+                f"(criterio de ACI 318-19 §22.7.4.1: el menor entre el voladizo "
+                f"real, la proyección del alma bajo el ala y 4·h_f). Vale si el "
+                f"ala es monolítica con el alma."
+            )
 
         if aoh <= 0 or ph <= 0:
             base["status"] = "ERROR"
@@ -248,6 +277,7 @@ class AashtoBeamShearTorsionDesign:
             torsion_type=self.torsion_type,
             redistributed=False,
             acp_mm2=acp, pcp_mm=pc, aoh_mm2=aoh, ph_mm=ph, ao_mm2=ao,
+            section_shape=self.section.shape, flange_overhang_mm=be,
             # theta_deg ya viene del resultado de cortante, en `base`.
             fy_long_mpa=fy_l,
             t_th_knm=t_th / 1e6, phi_t_th_knm=phi_t_th / 1e6,

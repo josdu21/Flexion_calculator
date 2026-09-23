@@ -30,6 +30,7 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from core.section_geometry import SectionProfile, SectionShape
 from core.shear import BeamShearResult, SlabShearResult
 
 
@@ -45,18 +46,24 @@ H_MAX_SIN_ESTRIBOS_MM = 400.0
 FYT_WARN_MPA = 520.0           # §5.4.3.3 (75 ksi) — por encima, verificar límite
 
 
-def dv_effective(de_mm: float, a_mm: float, h_mm: float) -> Tuple[float, str]:
+def dv_effective(de_mm: float, a_mm: float, h_mm: float,
+                 yc_mm: Optional[float] = None) -> Tuple[float, str]:
     """Peralte efectivo de cortante d_v (§5.7.2.8) y la rama que lo gobierna.
 
-        d_v = max(d_e − a/2, 0.9·d_e, 0.72·h)
+        d_v = max(d_e − ȳ, 0.9·d_e, 0.72·h)
 
     donde ``d_e`` es la distancia de la fibra extrema en compresión al
-    centroide de la fuerza de tracción y ``a`` la altura del bloque de
-    compresión equivalente. Devuelve ``(d_v, etiqueta)``; la etiqueta dice cuál
-    de los tres términos mandó, que es dato útil en la memoria.
+    centroide de la fuerza de tracción y ``ȳ`` la profundidad del centroide de
+    la fuerza de compresión. En sección rectangular ese centroide está en
+    ``a/2`` y basta con el bloque; con ala comprimida el centroide sube hacia
+    el ala y se pasa explícitamente en ``yc_mm``.
+
+    Devuelve ``(d_v, etiqueta)``; la etiqueta dice cuál de los tres términos
+    mandó, que es dato útil en la memoria.
     """
+    brazo = ("d_e − a/2", de_mm - a_mm / 2.0) if yc_mm is None         else ("d_e − ȳ", de_mm - yc_mm)
     candidatos = (
-        ("d_e − a/2", de_mm - a_mm / 2.0),
+        brazo,
         ("0.9·d_e", 0.9 * de_mm),
         ("0.72·h", 0.72 * h_mm),
     )
@@ -161,6 +168,11 @@ class AashtoBeamShearDesign:
         lam: float = 1.0,
         d_mm: float = 0.0,             # d de flexión; 0 = estimarlo
         a_mm: float = 0.0,             # bloque de compresión, para d_v
+        # El ala no cambia el cortante —b_v sigue siendo el alma— pero sí
+        # dónde cae el centroide de la compresión, y con eso d_v.
+        section_shape: SectionShape = SectionShape.RECTANGULAR,
+        bf_mm: float = 0.0,
+        hf_mm: float = 0.0,
         # Datos opcionales para la revisión longitudinal §5.7.3.5
         mu_nmm: float = 0.0,
         as_long_mm2: float = 0.0,
@@ -179,6 +191,10 @@ class AashtoBeamShearDesign:
         self.lam = lam
         self.d_override_mm = d_mm
         self.a_mm = max(a_mm, 0.0)
+        self.section = SectionProfile.create(
+            shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
+            bf_mm=bf_mm, hf_mm=hf_mm,
+        )
         self.mu_nmm = max(mu_nmm, 0.0)
         self.as_long_mm2 = max(as_long_mm2, 0.0)
         self.fy_long_mpa = fy_long_mpa
@@ -241,7 +257,11 @@ class AashtoBeamShearDesign:
         err = self._validate()
 
         de_mm = self._de_mm()
-        dv_mm, dv_gob = dv_effective(de_mm, self.a_mm, self.h_mm)
+        dv_mm, dv_gob = dv_effective(
+            de_mm, self.a_mm, self.h_mm,
+            yc_mm=(self.section.compression_centroid_mm(self.a_mm)
+                   if self.section.is_flanged else None),
+        )
         av = self.stirrup_legs * self.stirrup_area_mm2
         cot = 1.0 / math.tan(math.radians(THETA_DEG))
 
