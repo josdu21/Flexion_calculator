@@ -353,8 +353,7 @@ class ResultsPanel(QWidget):
             return
 
         def largo(mm: float) -> str:
-            return cv.format_length(mm / 1000.0 / cv.length_to_m,
-                                    cv.decimals_length)
+            return cv.format_length(mm, cv.decimals_length)
 
         self.shape_label.setText(forma.value)
         self.bf_label.setText(largo(result.bf_mm))

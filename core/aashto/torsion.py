@@ -149,6 +149,7 @@ class AashtoBeamShearTorsionDesign:
         section_shape: SectionShape = SectionShape.RECTANGULAR,
         bf_mm: float = 0.0,
         hf_mm: float = 0.0,
+        negative_moment: bool = False,
     ):
         self.vu_n = vu_n
         self.b_mm = b_mm
@@ -172,6 +173,7 @@ class AashtoBeamShearTorsionDesign:
         self.section_shape = section_shape
         self.bf_mm = bf_mm
         self.hf_mm = hf_mm
+        self.negative_moment = negative_moment
         self.section = SectionProfile.create(
             shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
             bf_mm=bf_mm, hf_mm=hf_mm,
@@ -200,6 +202,7 @@ class AashtoBeamShearTorsionDesign:
             section_shape=self.section_shape,
             bf_mm=self.bf_mm,
             hf_mm=self.hf_mm,
+            negative_moment=self.negative_moment,
         ).design()
 
     def _section_properties(self):

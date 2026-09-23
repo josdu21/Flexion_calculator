@@ -6,7 +6,8 @@ Aplicación de escritorio para diseñar acero de refuerzo por **flexión, cortan
 
 - ✅ **Dos normativas** en la misma sección: se eligen desde la cabecera y la memoria registra con cuál se calculó
 - ✅ Diseño de vigas y losas por flexión
-- ✅ **Secciones rectangulares, T y L** en viga, con el ala comprimida
+- ✅ **Secciones rectangulares, T y L** en viga
+- ✅ **Momento positivo o negativo** en viga (acero inferior o superior)
 - ✅ Diseño por cortante: estribos en viga y revisión de losa
 - ✅ Diseño por torsión combinado con cortante en viga
 - ✅ 3 sistemas de unidades: MKS (tonf, m), SI (kN, m), Inglés (kip, ft)
@@ -47,9 +48,10 @@ La viga se calcula como **rectangular**, **T** (ala a ambos lados) o **L** (ala
 a un lado, viga de borde). El tipo se elige en la geometría de la pestaña
 «Viga · Flexión» y de ahí lo toman el cortante y la torsión.
 
-- Se modela el **ala comprimida**, es decir momento positivo. En una zona de
-  momento negativo el ala queda traccionada y la sección responde como
-  rectangular de ancho `b_w`: para eso se elige esa forma.
+- Con **momento negativo** (selector «Signo» en Solicitación) el acero va
+  arriba y el ala queda traccionada: la flexión se calcula como rectangular de
+  ancho `b_w`. Para voladizos, la casilla «Elemento isostático» aplica el
+  `A_s,mín` con el menor entre `b_f` y `2·b_w` (ACI 318-19 §9.6.1.2).
 - `b_w` es el ancho del alma y es el que rige el cortante (`b_v`), la torsión y
   el `A_s,mín` de §9.6.1.2. El ala entra por el bloque de compresión, por el
   módulo de sección del `M_cr` de AASHTO y por el `A_cp` de torsión.

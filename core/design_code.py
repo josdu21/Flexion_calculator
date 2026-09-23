@@ -34,8 +34,10 @@ _ACI_FLEX_KEYS = frozenset({
     "mu_nmm", "b_mm", "h_mm", "cover_mm", "fc_mpa", "fy_mpa",
     "reinforcement", "db_assumed_mm",
     "section_shape", "bf_mm", "hf_mm",
+    "negative_moment", "statically_determinate",
 })
-_AASHTO_FLEX_KEYS = _ACI_FLEX_KEYS | {
+# AASHTO no tiene el caso isostático de §9.6.1.2: su mínimo es por momento.
+_AASHTO_FLEX_KEYS = (_ACI_FLEX_KEYS - {"statically_determinate"}) | {
     "bar_spec", "exposure_class", "ms_nmm", "lam",
 }
 
@@ -47,7 +49,7 @@ _ACI_BEAM_SHEAR_KEYS = frozenset({
     "section_shape", "bf_mm", "hf_mm",
 })
 _AASHTO_BEAM_SHEAR_KEYS = _ACI_BEAM_SHEAR_KEYS | {
-    "a_mm", "mu_nmm", "as_long_mm2",
+    "a_mm", "mu_nmm", "as_long_mm2", "negative_moment",
 }
 
 _ACI_SLAB_SHEAR_KEYS = frozenset({

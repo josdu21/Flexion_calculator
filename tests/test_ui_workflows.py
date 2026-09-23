@@ -1,6 +1,8 @@
 """Regresiones de los flujos de escritorio; ejecutar con unittest discover."""
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# Estudios recientes en un .ini temporal: los tests no tocan la configuración real.
+os.environ.setdefault('BEAMCALC_SETTINGS', os.path.join(os.environ.get('TEMP', '.'), 'beamcalc-tests.ini'))
 
 from pathlib import Path
 import shutil
@@ -47,7 +49,8 @@ class InterfaceWorkflows(unittest.TestCase):
 
     def test_navigation_and_calculations_in_every_unit_system(self):
         w = self.window
-        self.assertEqual(len(w.findChildren(QTabWidget)), 1)
+        # Una barra de pestañas por elemento: viga y losa.
+        self.assertEqual(len(w.findChildren(QTabWidget)), 2)
         contexts = ((True, True), (True, False), (False, True), (False, False))
         # El cortante toma el d (viga) y el As (losa) del diseño a flexión, así
         # que se compara contra el mismo helper que usa la ventana.
@@ -60,7 +63,7 @@ class InterfaceWorkflows(unittest.TestCase):
         for system in UnitSystem:
             w.unit_combo.setCurrentIndex(w.unit_combo.findData(system))
             for index, (results, calculate) in enumerate(analyses):
-                w.tabs.setCurrentIndex(index)
+                w.select_analysis(index)
                 self.app.processEvents()
                 self.assertEqual(w._active_context(), contexts[index])
                 self.assertEqual(results.result, calculate())
@@ -89,7 +92,7 @@ class InterfaceWorkflows(unittest.TestCase):
         previous = w.beam_flex_results.result.as_provided_cm2
         w.beam_flex_inputs.layer_bar_spins[0].setValue(5)
         self.assertGreater(w.beam_flex_results.result.as_provided_cm2, previous)
-        w.tabs.setCurrentIndex(1)
+        w.select_analysis(1)
         inputs, results = w.beam_shear_inputs, w.beam_shear_results
         self.assertTrue(inputs.torsion_options.isHidden())
         self.assertTrue(results.torsion_details.isHidden())
@@ -115,7 +118,7 @@ class InterfaceWorkflows(unittest.TestCase):
     def test_torsion_can_be_found_and_enabled_without_scrolling(self):
         w = self.window
         w.resize(960, 640)
-        w.tabs.setCurrentIndex(1)
+        w.select_analysis(1)
         for system in UnitSystem:
             w.unit_combo.setCurrentIndex(w.unit_combo.findData(system))
             inputs = w.beam_shear_inputs
@@ -147,11 +150,11 @@ class InterfaceWorkflows(unittest.TestCase):
             results.details.toggle.setChecked(True)
         w.beam_shear_results.torsion_details.toggle.setChecked(True)
         for index in range(4):
-            w.tabs.setCurrentIndex(index)
+            w.select_analysis(index)
             for _ in range(4):
                 self.app.processEvents()
             self.assertEqual(w.width(), 960)
-            for scroll in w.tabs.currentWidget().findChildren(QScrollArea):
+            for scroll in w.current_tab_widget().findChildren(QScrollArea):
                 self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
                 self.assertLessEqual(scroll.widget().minimumSizeHint().width(),
                                      scroll.viewport().width())
@@ -176,7 +179,7 @@ class InterfaceWorkflows(unittest.TestCase):
             w.beam_shear_inputs.torsion_group.setChecked(True)
             # Ambas pestañas de un elemento exportan la MISMA memoria.
             for index, name in ((0, 'viga_a.html'), (1, 'viga_b.html')):
-                w.tabs.setCurrentIndex(index)
+                w.select_analysis(index)
                 html = self._export_to(folder, name)
                 for heading in ('Cálculos de diseño (flexión)',
                                 'Cálculos de diseño (cortante)',
@@ -186,7 +189,7 @@ class InterfaceWorkflows(unittest.TestCase):
                 self.assertEqual(html.count('</html>'), 1)
 
             for index, name in ((2, 'losa_a.html'), (3, 'losa_b.html')):
-                w.tabs.setCurrentIndex(index)
+                w.select_analysis(index)
                 html = self._export_to(folder, name)
                 for heading in ('Cálculos de diseño (flexión)',
                                 'Revisión por cortante',
@@ -207,7 +210,7 @@ class InterfaceWorkflows(unittest.TestCase):
 
     def test_shear_uses_the_effective_depth_from_flexure(self):
         w = self.window
-        w.tabs.setCurrentIndex(0)
+        w.select_analysis(0)
         w.beam_flex_inputs.layer_bar_spins[0].setValue(5)
         self.app.processEvents()
         self.assertAlmostEqual(w.beam_shear_results.result.d_mm,
@@ -215,7 +218,7 @@ class InterfaceWorkflows(unittest.TestCase):
 
     def test_slab_shear_uses_the_flexural_reinforcement_in_vc(self):
         w = self.window
-        w.tabs.setCurrentIndex(2)
+        w.select_analysis(2)
         before = w.slab_shear_results.result
         self.assertFalse(before.rho_w_assumed)
         w.slab_flex_inputs.layer_bar_spins[0].setValue(

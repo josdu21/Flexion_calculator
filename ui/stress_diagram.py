@@ -165,10 +165,19 @@ class StressDiagramWidget(QWidget):
         else:
             p.drawRect(QRectF(x, y, b_px, h_px))
 
+        # Con momento negativo la cara comprimida es la inferior: las
+        # profundidades (a, c, lechos) se miden desde abajo en vez de arriba.
+        negativo = getattr(r, "negative_moment", False)
+
         # Bloque de Whitney: mientras cabe en el ala ocupa todo su ancho; si el
         # eje neutro baja al alma, el sobrante se dibuja sólo sobre el alma.
         a_px = min(r.a_mm * scale, h_px)
-        if a_px > 0:
+        if a_px > 0 and negativo:
+            # Compresión abajo, en el alma: el ala queda traccionada.
+            p.setPen(QPen(_qc(PALETTE.compression), 1.2))
+            p.setBrush(QBrush(_qc(PALETTE.compression, 170)))
+            p.drawRect(QRectF(web_x, y + h_px - a_px, bw_px, a_px))
+        elif a_px > 0:
             p.setPen(QPen(_qc(PALETTE.compression), 1.2))
             p.setBrush(QBrush(_qc(PALETTE.compression, 170)))
             if perfil.is_flanged and a_px > hf_px:
@@ -180,13 +189,14 @@ class StressDiagramWidget(QWidget):
         # Eje neutro
         c_px = min(r.c_mm * scale, h_px)
         if c_px > 0 and c_px < h_px:
+            en_y = y + h_px - c_px if negativo else y + c_px
             pen = QPen(_qc(PALETTE.neutral_axis), 1.8, Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawLine(QPointF(x - 8, y + c_px), QPointF(x + b_px + 8, y + c_px))
+            p.drawLine(QPointF(x - 8, en_y), QPointF(x + b_px + 8, en_y))
 
             p.setPen(_qc(PALETTE.neutral_axis))
             p.setFont(QFont("Sans", 8, QFont.Weight.Bold))
-            p.drawText(QPointF(x + b_px + 10, y + c_px + 3), "E.N.")
+            p.drawText(QPointF(x + b_px + 10, en_y + 3), "E.N.")
 
         # Acero de tensión: dibujar lechos reales según configuración.
         # Las barras van en el alma, no en el ala.
@@ -199,7 +209,9 @@ class StressDiagramWidget(QWidget):
                     r.reinforcement.layers, r.layer_y_positions_mm):
                 # Convertir y desde la fibra inferior a coordenada del dibujo
                 # (origen arriba: layer_y = y + (h - y_from_bottom)*scale)
-                layer_y_px = y + (r.h_mm - y_from_bottom) * scale
+                # En negativo el lecho se mide desde la cara superior.
+                layer_y_px = (y + y_from_bottom * scale if negativo
+                              else y + (r.h_mm - y_from_bottom) * scale)
                 n = layer.n_bars
                 # Radio visual proporcional al db
                 bar_radius = max(3, min(10, layer.bar_diameter_mm * scale * 0.5))
@@ -217,7 +229,7 @@ class StressDiagramWidget(QWidget):
         else:
             # Fallback genérico
             d_px = r.d_mm * scale
-            steel_y = y + d_px
+            steel_y = y + h_px - d_px if negativo else y + d_px
             for i in range(4):
                 cx = web_x + (i + 1) * (bw_px / 5)
                 p.drawEllipse(QPointF(cx, steel_y), 5, 5)
@@ -295,12 +307,18 @@ class StressDiagramWidget(QWidget):
         ref_x = x + w * 0.45
         a_px = min(r.a_mm * scale, h_px)
         stress_block_w = w * 0.35
+        negativo = getattr(r, "negative_moment", False)
+        # Borde superior del bloque comprimido y profundidad → coordenada.
+        top_a = y + h_px - a_px if negativo else y
+
+        def prof(px: float) -> float:
+            return y + h_px - px if negativo else y + px
 
         # Bloque de compresión (esfuerzo uniforme α₁·f'c)
         if a_px > 0:
             p.setPen(QPen(_qc(PALETTE.compression), 1.5))
             p.setBrush(QBrush(_qc(PALETTE.compression, 170)))
-            block_rect = QRectF(ref_x - stress_block_w, y, stress_block_w, a_px)
+            block_rect = QRectF(ref_x - stress_block_w, top_a, stress_block_w, a_px)
             p.drawRect(block_rect)
 
             # ACI usa siempre 0.85; AASHTO lo reduce por encima de 70 MPa.
@@ -308,13 +326,13 @@ class StressDiagramWidget(QWidget):
             p.setPen(_qc(PALETTE.text_primary))
             p.setFont(QFont("Sans", 8, QFont.Weight.Bold))
             p.drawText(
-                QRectF(ref_x - stress_block_w, y - 14, stress_block_w, 12),
+                QRectF(ref_x - stress_block_w, top_a - 14, stress_block_w, 12),
                 int(Qt.AlignmentFlag.AlignCenter),
                 f"{alpha_1:.2f}·f'c"
             )
 
             # Vector de compresión C
-            arrow_y = y + a_px / 2
+            arrow_y = top_a + a_px / 2
             arrow_start_x = ref_x - stress_block_w / 2
             arrow_end_x = ref_x - stress_block_w - 30
             self._draw_arrow(p, arrow_start_x, arrow_y, arrow_end_x, arrow_y,
@@ -331,8 +349,8 @@ class StressDiagramWidget(QWidget):
         if c_px > 0 and c_px < h_px:
             pen = QPen(_qc(PALETTE.neutral_axis), 1.5, Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawLine(QPointF(ref_x - stress_block_w - 5, y + c_px),
-                       QPointF(ref_x + 40, y + c_px))
+            p.drawLine(QPointF(ref_x - stress_block_w - 5, prof(c_px)),
+                       QPointF(ref_x + 40, prof(c_px)))
 
         # Línea de la sección lateral
         p.setPen(QPen(_qc(PALETTE.concrete_edge), 1, Qt.PenStyle.DotLine))
@@ -340,7 +358,7 @@ class StressDiagramWidget(QWidget):
 
         # Acero a profundidad del centroide d (esquemático)
         d_px = r.d_mm * scale
-        steel_y = y + d_px
+        steel_y = prof(d_px)
         p.setPen(QPen(_qc(PALETTE.steel), 1.5))
         p.setBrush(QBrush(_qc(PALETTE.steel)))
         # Dibujar marcador con 2 círculos esquemáticos en el centroide
@@ -364,7 +382,7 @@ class StressDiagramWidget(QWidget):
         cv = get_converter(self.unit_system)
         if r.a_mm > 0:
             jd_label_x = ref_x + 38
-            c_centroid_y = y + a_px / 2
+            c_centroid_y = top_a + a_px / 2
             t_centroid_y = steel_y
             p.setPen(QPen(_qc(PALETTE.dim_lines), 1))
             p.drawLine(QPointF(ref_x, c_centroid_y), QPointF(jd_label_x, c_centroid_y))

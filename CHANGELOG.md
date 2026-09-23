@@ -6,6 +6,60 @@ y [versionado semántico](https://semver.org/lang/es/).
 Para publicar una versión: `python packaging/bump_version.py <x.y.z>`, completar
 la entrada de abajo, commitear y etiquetar con `git tag v<x.y.z>`.
 
+## [2.3.0]
+
+### Agregado
+
+- **Momento negativo en viga.** Un selector «Signo» en Solicitación elige
+  entre momento positivo (acero inferior) y negativo (acero superior). En
+  negativo el armado definido pasa a la cara superior y la compresión queda
+  abajo, en el alma. `M_u` se sigue ingresando como magnitud.
+  - En sección T o L el ala queda traccionada: la flexión se calcula como una
+    rectangular de ancho `b_w` y la geometría real se conserva para el dibujo
+    y la torsión.
+  - ACI 318-19 §9.6.1.2: una casilla «Elemento isostático (voladizo)», visible
+    sólo con ala traccionada, hace que `A_s,mín` use el menor entre `b_f` y
+    `2·b_w`.
+  - AASHTO: el `M_cr` de §5.6.3.3 usa el módulo de sección de la fibra
+    superior (`I_g/y_sup`), y el `d_v` se mide con `a/2`.
+  - El diagrama dibuja las barras arriba y el bloque comprimido abajo; la
+    memoria rotula `M_u⁻` y recuerda la distribución del acero en el ala que
+    pide §24.3.4, que no se verifica.
+- Los resultados con momento positivo no cambian (verificado contra la 2.2.0).
+- La losa sigue calculándose sólo en momento positivo.
+
+### Cambiado
+
+- **Nueva pantalla de inicio** (diseño 1c de `UI_Design/`). A la izquierda,
+  un panel con los datos del proyecto (antes en un diálogo aparte), las
+  unidades, la normativa como selector segmentado y abrir/guardar. A la
+  derecha, las tarjetas **Viga** y **Losa en una dirección**, cada una con el
+  nombre del elemento, y la lista de **estudios recientes**: los últimos
+  abiertos o guardados, que se abren con doble clic o Enter. La lista vive en
+  la configuración del usuario, no en el estudio, y descarta los archivos que
+  ya no existen.
+- **Pestaña «Geometría y sección» rediseñada.** La forma se elige con tres
+  mosaicos (Rectangular, T, L); dimensiones y materiales usan campos con
+  botones −/+ y la unidad adentro; «Continuar a Flexión» pasa a la pestaña
+  siguiente. A la derecha, la sección acotada con dos capas que se prenden y
+  apagan (recubrimiento y centroide) y una franja con las propiedades de la
+  sección bruta: A_g, ȳ, I_g, E_c (según la norma activa) y β₁.
+- La cabecera del elemento muestra la forma como etiqueta y las pestañas van
+  numeradas en el orden de trabajo.
+- **Tema Nocturne** en toda la aplicación: fondo gris azulado, un solo acento
+  violeta, botones con contorno, tarjetas con filo de 1 px y colores de estado
+  desaturados. Usa la fuente Inter si está instalada y, si no, Segoe UI.
+- Cada elemento tiene su propio espacio de trabajo con pestañas
+  **Geometría · Flexión · Cortante**. La geometría (forma, dimensiones y
+  materiales) se define una sola vez, con un esquema acotado de la sección, y
+  la leen los análisis: los formularios de flexión y cortante ya no la repiten
+  y no hace falta desplazarse para llegar a los datos propios de cada uno.
+
+### Corregido
+
+- El grupo «Sección con ala» de resultados mostraba `b_f`, `h_f` y el límite
+  de `b_f` diez veces más chicos (convertía la unidad dos veces).
+
 ## [2.2.0]
 
 ### Agregado

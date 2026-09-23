@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QDoubleSpinBox,
-    QGridLayout, QGroupBox, QSpinBox, QComboBox
+    QGridLayout, QGroupBox, QSpinBox, QComboBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -9,6 +9,7 @@ from core.bar_tables import get_rebar_by_number
 from core.design_code import DEFAULT_CODE, DesignCode
 from core.flexion import ReinforcementConfig, RebarLayer
 from core.section_geometry import SectionShape
+from ui.geometry_panel import GeometryPanel
 from ui.form_helpers import scroll_form, set_si, set_choice
 
 
@@ -25,13 +26,10 @@ EXPOSURE_CLASSES = [
     ("Clase 1 — normal (γe = 1.00)", 1),
     ("Clase 2 — severa (γe = 0.75)", 2),
 ]
-
-# Formas de sección disponibles para viga. La losa es siempre una franja
-# rectangular de 1 m, así que allí el selector no aparece.
-SECTION_SHAPES = [
-    ("Rectangular", SectionShape.RECTANGULAR),
-    ("T — ala a ambos lados", SectionShape.T),
-    ("L — ala a un lado (borde)", SectionShape.L),
+# Signo del momento de diseño. Sólo en viga: la losa se calcula en positivo.
+MOMENT_SIGNS = [
+    ("Positivo — acero inferior", False),
+    ("Negativo — acero superior", True),
 ]
 
 
@@ -41,8 +39,13 @@ class InputPanel(QWidget):
     values_changed = pyqtSignal()
 
     def __init__(self, unit_system: UnitSystem, is_slab: bool = False,
-                 design_code: DesignCode = DEFAULT_CODE):
+                 design_code: DesignCode = DEFAULT_CODE,
+                 geometry: "GeometryPanel | None" = None):
         super().__init__()
+        # La geometría y los materiales se editan en su propia pestaña; este
+        # panel sólo los lee. Sin panel dado, se crea uno propio (no visible).
+        self.geometry = geometry or GeometryPanel(unit_system, is_slab=is_slab)
+        self.geometry.shape_changed.connect(self._apply_moment_sign)
         self.unit_system = unit_system
         self.is_slab = is_slab
         self.design_code = design_code
@@ -60,7 +63,7 @@ class InputPanel(QWidget):
         title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
         main_layout.addWidget(title)
-        hint = QLabel("Geometría y concreto compartidos con cortante.")
+        hint = QLabel("Geometría y materiales: pestaña «Geometría».")
         hint.setObjectName("infoLabel")
         hint.setWordWrap(True)
         main_layout.addWidget(hint)
@@ -75,120 +78,34 @@ class InputPanel(QWidget):
             step=max(0.1, converter.default_mu * 0.05),
         )
         self._add_field(load_layout, 0, "Mu", converter.moment_unit, self.mu_spinbox)
-        load_group.setLayout(load_layout)
 
-        # Geometría
-        geom_group = QGroupBox("Geometría")
-        geom_layout = QGridLayout()
-        geom_layout.setVerticalSpacing(6)
-
-        # Step apropiado para la unidad: 1 cm o 0.5 in
-        from core.units import UnitSystem
-        length_step = 0.5 if self.unit_system == UnitSystem.ENGLISH else 1.0
-        cover_step = 0.25 if self.unit_system == UnitSystem.ENGLISH else 0.5
-
-        row = 0
-        # Widgets propios de las secciones con ala; se pueblan sólo en viga.
-        self.shape_combo = None
-        self.bf_spinbox = None
-        self.hf_spinbox = None
-        self.b_label = None
-        self._flange_widgets = []
-
+        self.sign_combo = None
+        self.determinate_check = None
         if not self.is_slab:
-            geom_layout.addWidget(QLabel("Tipo de sección:"), row, 0)
-            self.shape_combo = QComboBox()
-            for etiqueta, dato in SECTION_SHAPES:
-                self.shape_combo.addItem(etiqueta, dato)
-            self.shape_combo.setAccessibleName("Tipo de sección")
-            self.shape_combo.setToolTip(
-                "Las secciones con ala se calculan con el ala comprimida, es "
-                "decir en momento positivo. Para una zona de momento negativo "
-                "elegí Rectangular con el ancho del alma."
+            load_layout.addWidget(QLabel("Signo:"), 1, 0)
+            self.sign_combo = QComboBox()
+            for etiqueta, dato in MOMENT_SIGNS:
+                self.sign_combo.addItem(etiqueta, dato)
+            self.sign_combo.setAccessibleName("Signo del momento")
+            self.sign_combo.setToolTip(
+                "Con momento negativo (sobre apoyos, voladizos) el armado que "
+                "definís va en la cara superior y la compresión queda abajo, en "
+                "el alma. Mu se ingresa siempre como magnitud."
             )
-            self.shape_combo.currentIndexChanged.connect(self._on_shape_changed)
-            geom_layout.addWidget(self.shape_combo, row, 1, 1, 2)
-            row += 1
+            self.sign_combo.currentIndexChanged.connect(self._on_sign_changed)
+            load_layout.addWidget(self.sign_combo, 1, 1, 1, 2)
 
-            self.b_spinbox = self._make_spinbox(
-                value=converter.default_b, rng=converter.range_b,
-                decimals=converter.decimals_length, step=length_step,
+            # ACI §9.6.1.2: con el ala traccionada en un elemento isostático el
+            # A_s,mín se mide con el menor entre b_f y 2·b_w.
+            self.determinate_check = QCheckBox("Elemento isostático (voladizo)")
+            self.determinate_check.setToolTip(
+                "ACI 318-19 §9.6.1.2: con el ala en tracción en un elemento "
+                "estáticamente determinado, el A_s mínimo usa el menor entre "
+                "b_f y 2·b_w en vez de b_w."
             )
-            self.b_label, _, _ = self._add_field(
-                geom_layout, row, "Ancho b", converter.length_unit, self.b_spinbox)
-            row += 1
-
-            self.bf_spinbox = self._make_spinbox(
-                value=converter.default_b * 4.0, rng=converter.range_b,
-                decimals=converter.decimals_length, step=length_step,
-            )
-            self.bf_spinbox.setToolTip(
-                "Ancho efectivo del ala. Lo ingresás vos: la aplicación "
-                "verifica el límite por espesor de ala (ACI 318-19 Tabla "
-                "6.3.2.1) pero no conoce la luz ni la separación entre almas."
-            )
-            self._flange_widgets += list(self._add_field(
-                geom_layout, row, "Ancho del ala b_f",
-                converter.length_unit, self.bf_spinbox))
-            row += 1
-
-            self.hf_spinbox = self._make_spinbox(
-                value=(6.0 if self.unit_system == UnitSystem.ENGLISH else 15.0),
-                rng=converter.range_h,
-                decimals=converter.decimals_length, step=length_step,
-            )
-            self.hf_spinbox.setToolTip("Espesor del ala (losa superior)")
-            self._flange_widgets += list(self._add_field(
-                geom_layout, row, "Espesor del ala h_f",
-                converter.length_unit, self.hf_spinbox))
-            row += 1
-        else:
-            self.b_spinbox = None
-            # Mostrar el ancho de la franja unitaria en la unidad actual
-            # 1 m = 100 cm = 39.37 in
-            b_franja = 100.0 if self.unit_system != UnitSystem.ENGLISH else 39.37
-            info = QLabel(
-                f"b = {b_franja:.1f} {converter.length_unit} "
-                f"(franja unitaria de 1 m)"
-            )
-            info.setObjectName("infoLabel")
-            geom_layout.addWidget(info, row, 0, 1, 3)
-            row += 1
-
-        self.h_spinbox = self._make_spinbox(
-            value=(6.0 if self.unit_system == UnitSystem.ENGLISH else 15.0)
-            if self.is_slab else converter.default_h, rng=converter.range_h,
-            decimals=converter.decimals_length, step=length_step,
-        )
-        self._add_field(geom_layout, row, "Altura h", converter.length_unit, self.h_spinbox)
-        row += 1
-
-        self.cover_spinbox = self._make_spinbox(
-            value=(0.75 if self.unit_system == UnitSystem.ENGLISH else 2.0)
-            if self.is_slab else converter.default_cover, rng=converter.range_cover,
-            decimals=converter.decimals_length, step=cover_step,
-        )
-        self._add_field(geom_layout, row, "Recubrimiento", converter.length_unit, self.cover_spinbox)
-        geom_group.setLayout(geom_layout)
-
-        # Materiales
-        mat_group = QGroupBox("Materiales")
-        mat_layout = QGridLayout()
-        mat_layout.setVerticalSpacing(6)
-        self.fc_spinbox = self._make_spinbox(
-            value=converter.default_fc, rng=converter.range_fc,
-            decimals=converter.decimals_stress,
-            step=max(1.0, converter.default_fc * 0.05),
-        )
-        self._add_field(mat_layout, 0, "f'c", converter.stress_unit, self.fc_spinbox)
-
-        self.fy_spinbox = self._make_spinbox(
-            value=converter.default_fy, rng=converter.range_fy,
-            decimals=converter.decimals_stress,
-            step=max(1.0, converter.default_fy * 0.05),
-        )
-        self._add_field(mat_layout, 1, "fy", converter.stress_unit, self.fy_spinbox)
-        mat_group.setLayout(mat_layout)
+            self.determinate_check.toggled.connect(self._emit_if_ready)
+            load_layout.addWidget(self.determinate_check, 2, 0, 1, 3)
+        load_group.setLayout(load_layout)
 
         # ----- Refuerzo -----
         rebar_group = QGroupBox("Refuerzo")
@@ -311,12 +228,12 @@ class InputPanel(QWidget):
         self.aashto_group.setLayout(aashto_layout)
 
         self.form_scroll = scroll_form(
-            load_group, geom_group, mat_group, rebar_group, self.aashto_group
+            load_group, rebar_group, self.aashto_group
         )
         main_layout.addWidget(self.form_scroll)
 
         self._apply_design_code()
-        self._apply_section_shape()
+        self._apply_moment_sign()
 
         # Conectar señales DESPUÉS de crear widgets
         self._connect_signals()
@@ -348,35 +265,39 @@ class InputPanel(QWidget):
         return lbl, widget, unit_lbl
 
     def _connect_signals(self):
-        for sb in [self.mu_spinbox, self.h_spinbox, self.cover_spinbox,
-                   self.fc_spinbox, self.fy_spinbox, self.ms_spinbox]:
-            if sb is not None:
-                sb.valueChanged.connect(self._emit_if_ready)
-        if self.b_spinbox is not None:
-            self.b_spinbox.valueChanged.connect(self._emit_if_ready)
-        for sb in (self.bf_spinbox, self.hf_spinbox):
-            if sb is not None:
-                sb.valueChanged.connect(self._emit_if_ready)
+        for sb in (self.mu_spinbox, self.ms_spinbox):
+            sb.valueChanged.connect(self._emit_if_ready)
+
+    # ---- geometría: se delega en el panel compartido ----
 
     def section_shape(self) -> SectionShape:
-        """Forma elegida; la losa es siempre una franja rectangular."""
-        if self.shape_combo is None:
-            return SectionShape.RECTANGULAR
-        return self.shape_combo.currentData()
+        return self.geometry.section_shape()
 
-    def _apply_section_shape(self):
-        """Muestra los campos del ala y ajusta el rótulo del ancho."""
-        if self.shape_combo is None:
+    b_spinbox = property(lambda self: self.geometry.b_spinbox)
+    h_spinbox = property(lambda self: self.geometry.h_spinbox)
+    cover_spinbox = property(lambda self: self.geometry.cover_spinbox)
+    fc_spinbox = property(lambda self: self.geometry.fc_spinbox)
+    fy_spinbox = property(lambda self: self.geometry.fy_spinbox)
+    shape_combo = property(lambda self: self.geometry.shape_combo)
+    bf_spinbox = property(lambda self: self.geometry.bf_spinbox)
+    hf_spinbox = property(lambda self: self.geometry.hf_spinbox)
+    b_label = property(lambda self: self.geometry.b_label)
+
+    def negative_moment(self) -> bool:
+        return bool(self.sign_combo is not None and self.sign_combo.currentData())
+
+    def _apply_moment_sign(self):
+        """La casilla de isostático sólo tiene efecto con ala traccionada en ACI."""
+        if self.determinate_check is None:
             return
-        con_ala = self.section_shape() is not SectionShape.RECTANGULAR
-        for w in self._flange_widgets:
-            w.setVisible(con_ala)
-        # Con ala, el ancho que se pide es el del alma: el que rige cortante,
-        # torsión y el A_s mínimo.
-        self.b_label.setText("Ancho del alma b_w" if con_ala else "Ancho b")
+        self.determinate_check.setVisible(
+            self.negative_moment()
+            and self.section_shape() is not SectionShape.RECTANGULAR
+            and self.design_code is DesignCode.ACI_318_19
+        )
 
-    def _on_shape_changed(self):
-        self._apply_section_shape()
+    def _on_sign_changed(self):
+        self._apply_moment_sign()
         self._emit_if_ready()
 
     def _apply_design_code(self):
@@ -408,12 +329,10 @@ class InputPanel(QWidget):
             self.exposure_combo.currentData(),
             self.ms_spinbox.value() * cv_previo.moment_to_knm,
         )
-        estado_forma = (
-            self.section_shape(),
-            (None if self.bf_spinbox is None
-             else self.bf_spinbox.value() * cv_previo.length_to_m * 1000.0),
-            (None if self.hf_spinbox is None
-             else self.hf_spinbox.value() * cv_previo.length_to_m * 1000.0),
+        estado_signo = (
+            self.negative_moment(),
+            bool(self.determinate_check is not None
+                 and self.determinate_check.isChecked()),
         )
         self.unit_system = unit_system
         old_layout = self.layout()
@@ -425,13 +344,10 @@ class InputPanel(QWidget):
         set_choice(self.bar_spec_combo, bar_spec)
         set_choice(self.exposure_combo, exposure)
         set_si(self.ms_spinbox, ms_knm, get_converter(unit_system).moment_to_knm)
-        forma, bf_mm, hf_mm = estado_forma
-        if self.shape_combo is not None:
-            set_choice(self.shape_combo, forma)
-            cv_nuevo = get_converter(unit_system)
-            set_si(self.bf_spinbox, bf_mm, 1000.0 * cv_nuevo.length_to_m)
-            set_si(self.hf_spinbox, hf_mm, 1000.0 * cv_nuevo.length_to_m)
-            self._apply_section_shape()
+        if self.sign_combo is not None:
+            set_choice(self.sign_combo, estado_signo[0])
+            self.determinate_check.setChecked(estado_signo[1])
+            self._apply_moment_sign()
         self._building = False
         self.values_changed.emit()
 
@@ -441,6 +357,7 @@ class InputPanel(QWidget):
             return
         self.design_code = code
         self._apply_design_code()
+        self._apply_moment_sign()
         self._emit_if_ready()
 
     def _clear_layout(self, layout):
@@ -488,21 +405,19 @@ class InputPanel(QWidget):
         )
 
     def get_state(self) -> dict:
-        """Estado serializable del panel, con las magnitudes en SI internas."""
+        """Estado serializable del panel, con las magnitudes en SI internas.
+
+        Incluye la geometría compartida: el archivo del estudio guarda cada
+        análisis completo, igual que antes de que la geometría tuviera pestaña.
+        """
         cv = get_converter(self.unit_system)
-        return {
+        estado = self.geometry.get_state()
+        estado.update({
             "mu_nmm": self.mu_spinbox.value() * cv.moment_to_knm * 1e6,
-            "b_mm": (None if self.is_slab
-                     else self.b_spinbox.value() * cv.length_to_m * 1000.0),
-            "h_mm": self.h_spinbox.value() * cv.length_to_m * 1000.0,
-            "cover_mm": self.cover_spinbox.value() * cv.length_to_m * 1000.0,
-            "fc_mpa": self.fc_spinbox.value() * cv.stress_to_mpa,
-            "fy_mpa": self.fy_spinbox.value() * cv.stress_to_mpa,
-            "section_shape": self.section_shape().name,
-            "bf_mm": (None if self.bf_spinbox is None
-                      else self.bf_spinbox.value() * cv.length_to_m * 1000.0),
-            "hf_mm": (None if self.hf_spinbox is None
-                      else self.hf_spinbox.value() * cv.length_to_m * 1000.0),
+            "negative_moment": self.negative_moment(),
+            "statically_determinate": bool(
+                self.determinate_check is not None
+                and self.determinate_check.isChecked()),
             "main_bar": self.main_bar_combo.currentData(),
             "stirrup_bar": (self.stirrup_combo.currentData()
                             if self.stirrup_combo else None),
@@ -511,7 +426,8 @@ class InputPanel(QWidget):
             "bar_spec": self.bar_spec_combo.currentData(),
             "exposure_class": self.exposure_combo.currentData(),
             "ms_nmm": self.ms_spinbox.value() * cv.moment_to_knm * 1e6,
-        }
+        })
+        return estado
 
     def set_state(self, state: dict) -> None:
         """Restaura el panel desde un estado en SI, sin recalcular por cada campo."""
@@ -519,23 +435,13 @@ class InputPanel(QWidget):
         self._building = True
         try:
             set_si(self.mu_spinbox, state.get("mu_nmm"), 1e6 * cv.moment_to_knm)
-            if not self.is_slab:
-                set_si(self.b_spinbox, state.get("b_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
-            set_si(self.fy_spinbox, state.get("fy_mpa"), cv.stress_to_mpa)
-            if self.shape_combo is not None:
-                # Un estudio anterior a la v3 no trae forma: era rectangular.
-                # Un nombre desconocido tampoco debe tumbar la carga.
-                try:
-                    forma = SectionShape[state.get("section_shape") or ""]
-                except KeyError:
-                    forma = SectionShape.RECTANGULAR
-                set_choice(self.shape_combo, forma)
-                set_si(self.bf_spinbox, state.get("bf_mm"), 1000.0 * cv.length_to_m)
-                set_si(self.hf_spinbox, state.get("hf_mm"), 1000.0 * cv.length_to_m)
-                self._apply_section_shape()
+            self.geometry.set_state(state)
+            if self.sign_combo is not None:
+                # Un estudio sin signo es anterior a esta opción: era positivo.
+                set_choice(self.sign_combo, bool(state.get("negative_moment", False)))
+                self.determinate_check.setChecked(
+                    bool(state.get("statically_determinate", False)))
+                self._apply_moment_sign()
             set_choice(self.main_bar_combo, state.get("main_bar"))
             set_choice(self.stirrup_combo, state.get("stirrup_bar"))
             set_choice(self.bar_spec_combo, state.get("bar_spec"))
@@ -557,31 +463,16 @@ class InputPanel(QWidget):
 
         mu_nmm = self.mu_spinbox.value() * converter.moment_to_knm * 1e6
 
-        if self.is_slab:
-            b_mm = 1000.0
-        else:
-            b_mm = self.b_spinbox.value() * converter.length_to_m * 1000.0
-
-        h_mm = self.h_spinbox.value() * converter.length_to_m * 1000.0
-        cover_mm = self.cover_spinbox.value() * converter.length_to_m * 1000.0
-        fc_mpa = self.fc_spinbox.value() * converter.stress_to_mpa
-        fy_mpa = self.fy_spinbox.value() * converter.stress_to_mpa
-
         # Se emite siempre el superconjunto de las dos normas; el despachador
         # de core/design_code.py entrega a cada motor sólo lo que acepta.
         return {
+            **self.geometry.values(),
             "mu_nmm": mu_nmm,
-            "b_mm": b_mm,
-            "h_mm": h_mm,
-            "cover_mm": cover_mm,
-            "fc_mpa": fc_mpa,
-            "fy_mpa": fy_mpa,
             "reinforcement": self.get_reinforcement_config(),
-            "section_shape": self.section_shape(),
-            "bf_mm": (self.bf_spinbox.value() * converter.length_to_m * 1000.0
-                      if self.bf_spinbox is not None else 0.0),
-            "hf_mm": (self.hf_spinbox.value() * converter.length_to_m * 1000.0
-                      if self.hf_spinbox is not None else 0.0),
+            "negative_moment": self.negative_moment(),
+            "statically_determinate": bool(
+                self.determinate_check is not None
+                and self.determinate_check.isChecked()),
             "bar_spec": self.bar_spec_combo.currentData(),
             "exposure_class": self.exposure_combo.currentData(),
             "ms_nmm": self.ms_spinbox.value() * converter.moment_to_knm * 1e6,

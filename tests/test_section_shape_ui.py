@@ -6,6 +6,8 @@ a un cambio de unidades y de normativa, y viaja en el archivo del estudio.
 """
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# Estudios recientes en un .ini temporal: los tests no tocan la configuración real.
+os.environ.setdefault('BEAMCALC_SETTINGS', os.path.join(os.environ.get('TEMP', '.'), 'beamcalc-tests.ini'))
 
 from pathlib import Path
 import shutil
@@ -66,18 +68,18 @@ class SelectorDeSeccion(unittest.TestCase):
         self.assertIsNone(self.window.slab_flex_inputs.bf_spinbox)
 
     def test_the_flange_fields_appear_only_with_a_flange(self):
-        # isHidden() y no isVisible(): estos campos viven dentro de un
-        # QScrollArea en una pestaña que puede no estar activa, y entonces
-        # isVisible() mide la visibilidad del ancestro, no la del campo.
-        self.assertTrue(self.panel.bf_spinbox.isHidden())
+        # El campo vive dentro de su stepper: se mira si es visible respecto
+        # del panel de geometría, que es lo que ve quien usa la pestaña.
+        geo = self.panel.geometry
+        self.assertFalse(self.panel.bf_spinbox.isVisibleTo(geo))
         self.elegir(SectionShape.T)
-        self.assertFalse(self.panel.bf_spinbox.isHidden())
-        self.assertFalse(self.panel.hf_spinbox.isHidden())
+        self.assertTrue(self.panel.bf_spinbox.isVisibleTo(geo))
+        self.assertTrue(self.panel.hf_spinbox.isVisibleTo(geo))
         self.elegir(SectionShape.RECTANGULAR)
-        self.assertTrue(self.panel.hf_spinbox.isHidden())
+        self.assertFalse(self.panel.hf_spinbox.isVisibleTo(geo))
 
     def test_the_width_label_says_web_when_there_is_a_flange(self):
-        self.assertIn("Ancho b", self.panel.b_label.text())
+        self.assertNotIn("alma", self.panel.b_label.text())
         self.elegir(SectionShape.T)
         self.assertIn("alma", self.panel.b_label.text())
 

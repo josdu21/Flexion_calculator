@@ -223,6 +223,7 @@ class AashtoBeamSection:
         section_shape: SectionShape = SectionShape.RECTANGULAR,
         bf_mm: float = 0.0,
         hf_mm: float = 0.0,
+        negative_moment: bool = False,
     ):
         self.mu_nmm = mu_nmm
         self.b_mm = b_mm
@@ -241,6 +242,15 @@ class AashtoBeamSection:
         self.section = SectionProfile.create(
             shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
             bf_mm=bf_mm, hf_mm=hf_mm,
+        )
+        # Con momento negativo el acero va arriba y la compresión abajo, en el
+        # alma: el ala (si la hay) queda traccionada y no aporta. Para flexión
+        # la sección se comporta entonces como rectangular de ancho b_w;
+        # ``self.section`` conserva la geometría real para lo demás.
+        self.negative_moment = bool(negative_moment)
+        self.flex = (
+            SectionProfile.create(SectionShape.RECTANGULAR, bw_mm=b_mm, h_mm=h_mm)
+            if self.negative_moment else self.section
         )
 
     # ------------------------------------------------------------
@@ -271,9 +281,9 @@ class AashtoBeamSection:
             return 0.0
         c = EPSILON_CU * dt_mm / denom
         a = b1 * c
-        if self.section.is_flanged:
+        if self.flex.is_flanged:
             return (a1 * self.fc_mpa
-                    * self.section.compression_area_mm2(a) / self.fy_mpa)
+                    * self.flex.compression_area_mm2(a) / self.fy_mpa)
         return a1 * self.fc_mpa * self.b_mm * a / self.fy_mpa
 
     def _as_for_moment(
@@ -297,18 +307,18 @@ class AashtoBeamSection:
         phi = PHI_TENSION
         as_mm2 = 0.0
 
-        if self.section.is_flanged:
+        if self.flex.is_flanged:
             # Misma iteración en φ, pero el A_s de cada vuelta sale del solver
             # por partes (ala + alma) en vez de la cuantía cerrada.
             for _ in range(50):
                 as_mm2, factible = steel_for_flanged_moment(
-                    self.section, m_nmm / phi, d_mm,
+                    self.flex, m_nmm / phi, d_mm,
                     a1 * self.fc_mpa, self.fy_mpa,
                 )
                 if not factible:
                     return 0.0, False
                 area = as_mm2 * self.fy_mpa / (a1 * self.fc_mpa)
-                c = self.section.block_depth_mm(area) / b1 if b1 > 0 else 0.0
+                c = self.flex.block_depth_mm(area) / b1 if b1 > 0 else 0.0
                 phi_nuevo = phi_flexure(self._strain_at(c, dt_mm), self.fy_mpa)
                 if abs(phi_nuevo - phi) < 1e-10:
                     break
@@ -364,15 +374,15 @@ class AashtoBeamSection:
         # En servicio la zona comprimida suele quedar dentro del ala, así que
         # la sección fisurada se analiza con el ancho comprimido b_f (que en
         # rectangular es el ancho de siempre).
-        b_comp = self.section.bf_mm
+        b_comp = self.flex.bf_mm
         rho = as_mm2 / (b_comp * d_mm)
         rn = rho * n
         k = math.sqrt(rn * rn + 2.0 * rn) - rn
         j = 1.0 - k / 3.0
-        if self.section.is_flanged and k * d_mm > self.section.hf_mm:
+        if self.flex.is_flanged and k * d_mm > self.flex.hf_mm:
             warnings_list.append(
                 "Control de fisuración: en servicio el eje neutro cae bajo el "
-                f"ala (k·d = {k * d_mm:.0f} mm > h_f = {self.section.hf_mm:.0f} "
+                f"ala (k·d = {k * d_mm:.0f} mm > h_f = {self.flex.hf_mm:.0f} "
                 "mm). La sección fisurada se analizó como rectangular de ancho "
                 "b_f, lo que subestima levemente f_ss (§5.6.7)."
             )
@@ -472,7 +482,10 @@ class AashtoBeamSection:
             # Con ala el módulo de sección de la fibra traccionada (la
             # inferior, con el ala comprimida) ya no es b·h²/6: el centroide
             # sube hacia el ala y S_inf crece.
-            _, _, _, sc = self.section.gross_properties()
+            _, y_inf, ig, sc = self.section.gross_properties()
+            if self.negative_moment:
+                # La fibra traccionada es la superior (el ala): S_sup.
+                sc = ig / (self.h_mm - y_inf)
         else:
             sc = self.b_mm * self.h_mm ** 2 / 6.0     # sección bruta rectangular
         g3 = gamma_3(self.bar_spec)
@@ -495,15 +508,15 @@ class AashtoBeamSection:
             if d_mm > 0 and self.b_mm > 0 else 0.0
         )
 
-        if self.section.is_flanged:
+        if self.flex.is_flanged:
             area_comp_mm2 = (
                 as_provided_mm2 * self.fy_mpa / (a1 * self.fc_mpa)
                 if self.fc_mpa > 0 else 0.0
             )
-            a_mm = self.section.block_depth_mm(area_comp_mm2)
-            yc_mm = self.section.compression_centroid_mm(a_mm)
+            a_mm = self.flex.block_depth_mm(area_comp_mm2)
+            yc_mm = self.flex.compression_centroid_mm(a_mm)
             compression_kn = (a1 * self.fc_mpa
-                              * self.section.compression_area_mm2(a_mm)) / 1000.0
+                              * self.flex.compression_area_mm2(a_mm)) / 1000.0
         else:
             a_mm = (
                 as_provided_mm2 * self.fy_mpa / (a1 * self.fc_mpa * self.b_mm)
@@ -585,12 +598,12 @@ class AashtoBeamSection:
             )
 
         # --- Ancho efectivo del ala (§4.6.2.6.1) ---
-        comportamiento_t = self.section.flange_is_fully_compressed(a_mm)
+        comportamiento_t = self.flex.flange_is_fully_compressed(a_mm)
         asf_cm2 = 0.0
         if comportamiento_t:
             asf_cm2 = (a1 * self.fc_mpa
-                       * (self.section.bf_mm - self.section.bw_mm)
-                       * self.section.hf_mm / self.fy_mpa) / 100.0
+                       * (self.flex.bf_mm - self.flex.bw_mm)
+                       * self.flex.hf_mm / self.fy_mpa) / 100.0
 
         return AashtoFlexionResult(
             b_mm=self.b_mm,
@@ -635,6 +648,8 @@ class AashtoBeamSection:
             flanged_behaviour=comportamiento_t,
             asf_cm2=asf_cm2,
             bf_max_mm=self.section.aci_max_flange_width_mm(),
+            negative_moment=self.negative_moment,
+            as_min_width_mm=self.b_mm,
             # --- propios de AASHTO ---
             phi_flexion=phi,
             epsilon_t=eps_t,

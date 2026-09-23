@@ -1,6 +1,8 @@
 """Guardado y apertura del estudio, y metadatos del cajetín en la memoria."""
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# Estudios recientes en un .ini temporal: los tests no tocan la configuración real.
+os.environ.setdefault('BEAMCALC_SETTINGS', os.path.join(os.environ.get('TEMP', '.'), 'beamcalc-tests.ini'))
 
 from pathlib import Path
 import shutil
@@ -107,7 +109,7 @@ class StudyFile(unittest.TestCase):
         with patch('ui.main_window.QFileDialog.getSaveFileName',
                    return_value=(str(destino), '')), \
              patch('ui.main_window.webbrowser.open'):
-            w.tabs.setCurrentIndex(0)
+            w.select_analysis(0)
             w._export_report()
         html = destino.read_text(encoding='utf-8')
         for texto in ("Puente Río", "J. Duarte", "M. Pérez", "Rev. 02",

@@ -48,9 +48,18 @@ _DV_TEX = {
 
 
 def _con_ala(result) -> bool:
-    """¿El resultado viene de una sección con ala (T o L)?"""
+    """¿El ala de una sección T o L trabaja en compresión?
+
+    Con momento negativo el ala queda traccionada y la flexión se desarrolla
+    como en una rectangular de ancho b_w, así que la respuesta es no.
+    """
     forma = getattr(result, "section_shape", SectionShape.RECTANGULAR)
-    return forma is not SectionShape.RECTANGULAR
+    return (forma is not SectionShape.RECTANGULAR
+            and not getattr(result, "negative_moment", False))
+
+
+def _negativo(result) -> bool:
+    return bool(getattr(result, "negative_moment", False))
 
 
 def _perfil(result) -> SectionProfile:
@@ -107,13 +116,22 @@ def _aci_flexion_steps(result: FlexionDesignResult, cv) -> dict:
     mu_nmm = result.mu_demand_knm * 1e6
     m_val = fy / (0.85 * fc) if fc > 0 else 0.0
     rho_max = (0.85 * beta_1 * fc / fy) * (0.003 / 0.007) if fy > 0 else 0.0
-    term1 = (0.25 * math.sqrt(fc) / fy * b * d / 100) if fy > 0 else 0.0
-    term2 = (1.4 / fy * b * d / 100) if fy > 0 else 0.0
+    b_min = getattr(result, "as_min_width_mm", 0.0) or b
+    term1 = (0.25 * math.sqrt(fc) / fy * b_min * d / 100) if fy > 0 else 0.0
+    term2 = (1.4 / fy * b_min * d / 100) if fy > 0 else 0.0
     as_prov_mm2 = result.as_provided_cm2 * 100.0
     jd_tex = _jd_tex(result)
     # §9.6.1.2 mide sobre el ancho del alma cuando el ala está comprimida.
-    min_nota = ("<p>En una sección con ala comprimida, el $b$ de esta fórmula "
-                "es el ancho del alma $b_w$.</p>" if _con_ala(result) else "")
+    if _perfil(result).is_flanged and _negativo(result) and b_min > b:
+        min_nota = (f"<p>Ala traccionada en un elemento isostático: el $b$ de "
+                    f"esta fórmula es el menor entre $b_f$ y $2b_w$, "
+                    f"{b_min:.0f} mm.</p>")
+    elif _perfil(result).is_flanged:
+        estado = "traccionada" if _negativo(result) else "comprimida"
+        min_nota = (f"<p>En una sección con ala {estado}, el $b$ de esta "
+                    f"fórmula es el ancho del alma $b_w$.</p>")
+    else:
+        min_nota = ""
 
     return {
         "phi": 0.9,
@@ -229,8 +247,11 @@ def _aashto_flexion_steps(result, cv) -> dict:
     as_prov_mm2 = result.as_provided_cm2 * 100.0
     jd_tex = _jd_tex(result)
     # Con ala el centroide sube hacia el ala y S_c deja de ser b·h²/6.
-    sc_tex = (r"\dfrac{I_g}{y_{inf}}" if _con_ala(result)
-              else r"\dfrac{b\,h^2}{6}")
+    if _perfil(result).is_flanged:
+        sc_tex = (r"\dfrac{I_g}{y_{sup}}" if _negativo(result)
+                  else r"\dfrac{I_g}{y_{inf}}")
+    else:
+        sc_tex = r"\dfrac{b\,h^2}{6}"
     mn_knm = result.phi_mn_knm / phi if phi > 0 else 0.0
 
     comportamiento_chip = {
@@ -594,7 +615,7 @@ def _stress_block_section(result, cv, steps) -> str:
     eq_clase = "ok" if equilibrado else "fail"
     eq_texto = "CUMPLE" if equilibrado else "NO CUMPLE"
 
-    if not perfil.is_flanged:
+    if not _con_ala(result):
         return f"""
 <h3>2.6 {steps["whitney_title"]}
   {steps["whitney_ref"]}
@@ -717,6 +738,18 @@ _NOTA_ALA_AASHTO = """
 """
 
 
+_NOTA_ALA_TRACCIONADA = """
+<div class="alert-info">
+  <b>Momento negativo: ala traccionada.</b> El acero está en la cara superior y
+  la compresión en la inferior, dentro del alma: la flexión se calcula como
+  una sección rectangular de ancho $b_w$ y el ala no aporta resistencia.
+  ACI 318-19 §24.3.4 pide repartir parte de ese acero en el ancho efectivo del
+  ala (o en $l_n/10$, el menor) y colocar refuerzo longitudinal adicional en
+  las zonas exteriores del ala; esa distribución no se verifica acá.
+</div>
+"""
+
+
 def _flexion_steps(result, cv, code: DesignCode) -> dict:
     if code is DesignCode.AASHTO_LRFD_2020:
         steps = _aashto_flexion_steps(result, cv)
@@ -726,6 +759,10 @@ def _flexion_steps(result, cv, code: DesignCode) -> dict:
     # Las secciones 2.6 y 2.7 son comunes a las dos normas salvo por el
     # esfuerzo del bloque, que ya viene resuelto en ``alpha_tex``.
     steps["block_section"] = _stress_block_section(result, cv, steps)
+
+    if _perfil(result).is_flanged and _negativo(result):
+        steps["flange_note"] = _NOTA_ALA_TRACCIONADA
+        return steps
 
     if _con_ala(result):
         steps["required_block"] = _flanged_required_block(result, cv, steps, code)
@@ -898,8 +935,8 @@ def _flexion_fragments(
 <h3>1.1 Solicitación</h3>
 <table class="data">
   <tr>
-    <td>Momento último de diseño</td>
-    <td>$M_u$</td>
+    <td>Momento último de diseño{" <b>negativo</b> (acero superior)" if _negativo(result) else ""}</td>
+    <td>${"M_u^-" if _negativo(result) else "M_u"}$</td>
     <td class="num">{M(result.mu_demand_knm)}</td>
   </tr>
   {extra_load_rows}
@@ -982,8 +1019,8 @@ def _flexion_fragments(
     <td class="num">{M(phi_mn)}</td>
   </tr>
   <tr>
-    <td>Momento último de diseño</td>
-    <td>$M_u$</td>
+    <td>Momento último de diseño{" <b>negativo</b> (acero superior)" if _negativo(result) else ""}</td>
+    <td>${"M_u^-" if _negativo(result) else "M_u"}$</td>
     <td class="num">{M(result.mu_demand_knm)}</td>
   </tr>
   <tr>

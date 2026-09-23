@@ -6,6 +6,8 @@ y que los campos propios de AASHTO aparecen sólo cuando corresponde.
 """
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# Estudios recientes en un .ini temporal: los tests no tocan la configuración real.
+os.environ.setdefault('BEAMCALC_SETTINGS', os.path.join(os.environ.get('TEMP', '.'), 'beamcalc-tests.ini'))
 
 from pathlib import Path
 import tempfile
@@ -136,7 +138,7 @@ class SelectorDeNormativa(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(w.current_code, DesignCode.AASHTO_LRFD_2020)
-        self.assertTrue(w.beam_flex_inputs.aashto_group.isVisible())
+        self.assertFalse(w.beam_flex_inputs.aashto_group.isHidden())
         self.assertEqual(
             code_of(w._beam_flex_design()), DesignCode.AASHTO_LRFD_2020
         )
@@ -151,7 +153,7 @@ class SelectorDeNormativa(unittest.TestCase):
             with self.subTest(code=code.value):
                 self._elegir(code)
                 for indice in (0, 2):     # viga y losa
-                    w.tabs.setCurrentIndex(indice)
+                    w.select_analysis(indice)
                     with tempfile.TemporaryDirectory() as tmp:
                         destino = Path(tmp) / "memoria.html"
                         with patch(

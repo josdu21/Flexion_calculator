@@ -173,6 +173,8 @@ class AashtoBeamShearDesign:
         section_shape: SectionShape = SectionShape.RECTANGULAR,
         bf_mm: float = 0.0,
         hf_mm: float = 0.0,
+        # Con momento negativo la compresión está en el alma, rectangular.
+        negative_moment: bool = False,
         # Datos opcionales para la revisión longitudinal §5.7.3.5
         mu_nmm: float = 0.0,
         as_long_mm2: float = 0.0,
@@ -191,6 +193,7 @@ class AashtoBeamShearDesign:
         self.lam = lam
         self.d_override_mm = d_mm
         self.a_mm = max(a_mm, 0.0)
+        self.negative_moment = bool(negative_moment)
         self.section = SectionProfile.create(
             shape=section_shape, bw_mm=b_mm, h_mm=h_mm,
             bf_mm=bf_mm, hf_mm=hf_mm,
@@ -260,7 +263,8 @@ class AashtoBeamShearDesign:
         dv_mm, dv_gob = dv_effective(
             de_mm, self.a_mm, self.h_mm,
             yc_mm=(self.section.compression_centroid_mm(self.a_mm)
-                   if self.section.is_flanged else None),
+                   if self.section.is_flanged and not self.negative_moment
+                   else None),
         )
         av = self.stirrup_legs * self.stirrup_area_mm2
         cot = 1.0 / math.tan(math.radians(THETA_DEG))

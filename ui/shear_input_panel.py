@@ -9,6 +9,7 @@ from core.units import UnitSystem, get_converter
 from core.bar_tables import get_rebar_by_number
 from core.design_code import DEFAULT_CODE, DesignCode
 from core.section_geometry import SectionShape
+from ui.geometry_panel import GeometryPanel
 from ui.form_helpers import scroll_form, set_si, set_choice
 
 
@@ -102,8 +103,10 @@ class BeamShearInputPanel(QWidget):
     values_changed = pyqtSignal()
 
     def __init__(self, unit_system: UnitSystem,
-                 design_code: DesignCode = DEFAULT_CODE):
+                 design_code: DesignCode = DEFAULT_CODE,
+                 geometry: "GeometryPanel | None" = None):
         super().__init__()
+        self.geometry = geometry or GeometryPanel(unit_system)
         self.unit_system = unit_system
         self.design_code = design_code
         self.section_shape = SectionShape.RECTANGULAR
@@ -139,13 +142,18 @@ class BeamShearInputPanel(QWidget):
         title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
         main_layout.addWidget(title)
-        hint = QLabel("Geometría y concreto compartidos con flexión.")
+        hint = QLabel("Geometría y materiales: pestaña «Geometría».")
         hint.setObjectName("infoLabel")
         hint.setWordWrap(True)
         main_layout.addWidget(hint)
 
-        length_step = 0.5 if self.unit_system == UnitSystem.ENGLISH else 1.0
-        cover_step = 0.25 if self.unit_system == UnitSystem.ENGLISH else 0.5
+        # La forma se elige en «Geometría»; acá se informa porque cambia el
+        # significado de «b» y el A_cp de torsión.
+        self.shape_note = QLabel()
+        self.shape_note.setObjectName("infoLabel")
+        self.shape_note.setWordWrap(True)
+        main_layout.addWidget(self.shape_note)
+        self._apply_section_note()
 
         # Solicitación
         load_group = QGroupBox("Solicitación")
@@ -201,56 +209,16 @@ class BeamShearInputPanel(QWidget):
         tor_layout.addWidget(self.tor_note, 3, 0, 1, 3)
 
 
-        # Geometría
-        geom_group = QGroupBox("Geometría")
-        geom_layout = QGridLayout()
-        geom_layout.setVerticalSpacing(6)
-
-        self.b_spinbox = _make_spinbox(
-            value=cv.default_b, rng=cv.range_b,
-            decimals=cv.decimals_length, step=length_step,
-        )
-        _add_field(geom_layout, 0, "Ancho b", cv.length_unit, self.b_spinbox)
-
-        self.h_spinbox = _make_spinbox(
-            value=cv.default_h, rng=cv.range_h,
-            decimals=cv.decimals_length, step=length_step,
-        )
-        _add_field(geom_layout, 1, "Altura h", cv.length_unit, self.h_spinbox)
-
-        self.cover_spinbox = _make_spinbox(
-            value=cv.default_cover, rng=cv.range_cover,
-            decimals=cv.decimals_length, step=cover_step,
-        )
-        _add_field(geom_layout, 2, "Recubrimiento", cv.length_unit, self.cover_spinbox)
-
-        # La forma de la sección se elige una sola vez, en flexión. Acá sólo se
-        # informa, porque cambia el significado de "b" y el A_cp de torsión.
-        self.shape_note = QLabel()
-        self.shape_note.setObjectName("infoLabel")
-        self.shape_note.setWordWrap(True)
-        geom_layout.addWidget(self.shape_note, 3, 0, 1, 3)
-        self._apply_section_note()
-
-        geom_group.setLayout(geom_layout)
-
         # Materiales
         mat_group = QGroupBox("Materiales")
         mat_layout = QGridLayout()
         mat_layout.setVerticalSpacing(6)
-        self.fc_spinbox = _make_spinbox(
-            value=cv.default_fc, rng=cv.range_fc,
-            decimals=cv.decimals_stress,
-            step=max(1.0, cv.default_fc * 0.05),
-        )
-        _add_field(mat_layout, 0, "f'c", cv.stress_unit, self.fc_spinbox)
-
         self.fyt_spinbox = _make_spinbox(
             value=cv.default_fy, rng=cv.range_fy,
             decimals=cv.decimals_stress,
             step=max(1.0, cv.default_fy * 0.05),
         )
-        _add_field(mat_layout, 1, "fyt (estribo)", cv.stress_unit, self.fyt_spinbox)
+        _add_field(mat_layout, 0, "fyt (estribo)", cv.stress_unit, self.fyt_spinbox)
         mat_group.setLayout(mat_layout)
 
         # Estribo propuesto
@@ -308,11 +276,17 @@ class BeamShearInputPanel(QWidget):
         self.torsion_group.toggled.connect(self.torsion_options.setVisible)
         self.torsion_group.toggled.connect(lambda active: self.torsion_hint.setVisible(not active))
         self.form_scroll = scroll_form(
-            load_group, self.torsion_group, geom_group, mat_group, stirrup_group
+            load_group, self.torsion_group, mat_group, stirrup_group
         )
         main_layout.addWidget(self.form_scroll)
         self._apply_design_code()
         self._connect_signals()
+
+    # ---- geometría: la edita la pestaña «Geometría», acá sólo se lee ----
+    b_spinbox = property(lambda self: self.geometry.b_spinbox)
+    h_spinbox = property(lambda self: self.geometry.h_spinbox)
+    cover_spinbox = property(lambda self: self.geometry.cover_spinbox)
+    fc_spinbox = property(lambda self: self.geometry.fc_spinbox)
 
     def _apply_design_code(self):
         """Ajusta las notas de norma; el cortante no cambia de campos."""
@@ -346,8 +320,7 @@ class BeamShearInputPanel(QWidget):
         self._emit_if_ready()
 
     def _connect_signals(self):
-        for sb in [self.vu_spinbox, self.tu_spinbox, self.b_spinbox, self.h_spinbox,
-                   self.cover_spinbox, self.fc_spinbox, self.fyt_spinbox,
+        for sb in [self.vu_spinbox, self.tu_spinbox, self.fyt_spinbox,
                    self.fy_long_spinbox]:
             sb.valueChanged.connect(self._emit_if_ready)
 
@@ -401,10 +374,6 @@ class BeamShearInputPanel(QWidget):
         try:
             set_si(self.vu_spinbox, state.get("vu_n"),
                    _force_input_factor(self.unit_system))
-            set_si(self.b_spinbox, state.get("b_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
             set_si(self.fyt_spinbox, state.get("fyt_mpa"), cv.stress_to_mpa)
             set_si(self.tu_spinbox, state.get("tu_nmm"), 1e6 * cv.moment_to_knm)
             set_si(self.fy_long_spinbox, state.get("fy_long_mpa"), cv.stress_to_mpa)
@@ -465,8 +434,10 @@ class SlabShearInputPanel(QWidget):
     values_changed = pyqtSignal()
 
     def __init__(self, unit_system: UnitSystem,
-                 design_code: DesignCode = DEFAULT_CODE):
+                 design_code: DesignCode = DEFAULT_CODE,
+                 geometry: "GeometryPanel | None" = None):
         super().__init__()
+        self.geometry = geometry or GeometryPanel(unit_system, is_slab=True)
         self.unit_system = unit_system
         self.design_code = design_code
         self._building = True
@@ -482,13 +453,11 @@ class SlabShearInputPanel(QWidget):
         title = QLabel("Datos de entrada")
         title.setObjectName("panelTitle")
         main_layout.addWidget(title)
-        hint = QLabel("Geometría y concreto compartidos con flexión.")
+        hint = QLabel("Geometría y materiales: pestaña «Geometría».")
         hint.setObjectName("infoLabel")
         hint.setWordWrap(True)
         main_layout.addWidget(hint)
 
-        length_step = 0.5 if self.unit_system == UnitSystem.ENGLISH else 1.0
-        cover_step = 0.25 if self.unit_system == UnitSystem.ENGLISH else 0.5
 
         # Solicitación
         load_group = QGroupBox("Solicitación")
@@ -502,46 +471,6 @@ class SlabShearInputPanel(QWidget):
         )
         _add_field(load_layout, 0, "Vu (por franja 1 m)", cv.force_unit, self.vu_spinbox)
         load_group.setLayout(load_layout)
-
-        # Geometría (b fija = 1 m, sólo se muestra)
-        geom_group = QGroupBox("Geometría")
-        geom_layout = QGridLayout()
-        geom_layout.setVerticalSpacing(6)
-
-        b_franja = 100.0 if self.unit_system != UnitSystem.ENGLISH else 39.37
-        info = QLabel(
-            f"b = {b_franja:.1f} {cv.length_unit} (franja unitaria de 1 m)"
-        )
-        info.setObjectName("infoLabel")
-        geom_layout.addWidget(info, 0, 0, 1, 3)
-
-        # Default un poco más fina para losa
-        default_h_slab = 15.0 if self.unit_system != UnitSystem.ENGLISH else 6.0
-        self.h_spinbox = _make_spinbox(
-            value=default_h_slab, rng=cv.range_h,
-            decimals=cv.decimals_length, step=length_step,
-        )
-        _add_field(geom_layout, 1, "Espesor h", cv.length_unit, self.h_spinbox)
-
-        default_cover_slab = 2.0 if self.unit_system != UnitSystem.ENGLISH else 0.75
-        self.cover_spinbox = _make_spinbox(
-            value=default_cover_slab, rng=cv.range_cover,
-            decimals=cv.decimals_length, step=cover_step,
-        )
-        _add_field(geom_layout, 2, "Recubrimiento", cv.length_unit, self.cover_spinbox)
-        geom_group.setLayout(geom_layout)
-
-        # Materiales
-        mat_group = QGroupBox("Materiales")
-        mat_layout = QGridLayout()
-        mat_layout.setVerticalSpacing(6)
-        self.fc_spinbox = _make_spinbox(
-            value=cv.default_fc, rng=cv.range_fc,
-            decimals=cv.decimals_stress,
-            step=max(1.0, cv.default_fc * 0.05),
-        )
-        _add_field(mat_layout, 0, "f'c", cv.stress_unit, self.fc_spinbox)
-        mat_group.setLayout(mat_layout)
 
         # Refuerzo longitudinal de flexión (sólo afecta el cálculo de d)
         ref_group = QGroupBox("Refuerzo longitudinal")
@@ -563,11 +492,16 @@ class SlabShearInputPanel(QWidget):
         ref_layout.addWidget(self.code_note, 1, 0, 1, 3)
         ref_group.setLayout(ref_layout)
 
-        self.form_scroll = scroll_form(load_group, geom_group, mat_group, ref_group)
+        self.form_scroll = scroll_form(load_group, ref_group)
         main_layout.addWidget(self.form_scroll)
 
         self._apply_design_code()
         self._connect_signals()
+
+    # ---- geometría: la edita la pestaña «Geometría», acá sólo se lee ----
+    h_spinbox = property(lambda self: self.geometry.h_spinbox)
+    cover_spinbox = property(lambda self: self.geometry.cover_spinbox)
+    fc_spinbox = property(lambda self: self.geometry.fc_spinbox)
 
     def _apply_design_code(self):
         if self.design_code is DesignCode.AASHTO_LRFD_2020:
@@ -592,9 +526,7 @@ class SlabShearInputPanel(QWidget):
         self._emit_if_ready()
 
     def _connect_signals(self):
-        for sb in [self.vu_spinbox, self.h_spinbox,
-                   self.cover_spinbox, self.fc_spinbox]:
-            sb.valueChanged.connect(self._emit_if_ready)
+        self.vu_spinbox.valueChanged.connect(self._emit_if_ready)
 
     def _emit_if_ready(self):
         if not self._building:
@@ -631,9 +563,6 @@ class SlabShearInputPanel(QWidget):
         try:
             set_si(self.vu_spinbox, state.get("vu_n"),
                    _force_input_factor(self.unit_system))
-            set_si(self.h_spinbox, state.get("h_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.cover_spinbox, state.get("cover_mm"), 1000.0 * cv.length_to_m)
-            set_si(self.fc_spinbox, state.get("fc_mpa"), cv.stress_to_mpa)
             set_choice(self.db_long_combo, state.get("db_long_bar"))
         finally:
             self._building = False
